@@ -1,0 +1,1148 @@
+#!/usr/bin/env python3
+
+# SAFE COMPUTER CLASS v0.5
+
+
+
+import sys
+
+import subprocess
+
+import pwd
+
+import sqlite3
+
+from pathlib import Path
+
+import argparse
+
+from datetime import datetime
+
+import socket
+
+
+
+SAMBA_BASE = "/srv/samba"
+
+DB_PATH = f"{SAMBA_BASE}/school.db"
+
+MOUNTS_BASE = "/srv/samba_mounts"
+
+
+
+
+
+class SchoolSamba:
+
+    def __init__(self):
+
+        self.base = Path(SAMBA_BASE)
+
+        self.base.mkdir(exist_ok=True)
+
+        Path(MOUNTS_BASE).mkdir(exist_ok=True)
+
+        self.init_db()
+
+        self.ensure_groups()
+
+
+
+    def print_help(self):
+
+        host = socket.gethostname()
+
+        lines = [
+
+            "SAFE COMPUTER CLASS v0.5",
+
+            "",
+
+            f"share: \\\\{host}\\school",
+
+            "",
+
+            "commands:",
+
+            "  init                             init structure and samba",
+
+            "  addclass <class>                 create class",
+
+            "  addteacher <name> <uid> <pass>   add teacher (no class yet)",
+
+            "  addteacherclass <name> <class>   link teacher to class",
+
+            "  delteacherclass <name> <class>   unlink teacher from class",
+
+            "  addstudent <name> <class> <uid> <pass>",
+
+            "                                   add student",
+
+            "  delclass <class>                 delete class (if no users)",
+
+            "  deluser <name>                   delete user",
+
+            "  mount <name>                     remount user binds",
+
+            "  umount <name>                    unmount user binds",
+
+            "  list                             list users",
+
+            "  listclasses                      list classes",
+
+            "  status                           show status",
+
+            "  restart                          restart samba with config",
+
+            "  backup                           backup database",
+
+            "  help                             show this help",
+
+        ]
+
+        print("\n".join(lines))
+
+
+
+    def init_db(self):
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute(
+
+            """CREATE TABLE IF NOT EXISTS users (
+
+                   id INTEGER PRIMARY KEY,
+
+                   username TEXT UNIQUE,
+
+                   role TEXT,
+
+                   class_name TEXT,
+
+                   uid INTEGER
+
+               )"""
+
+        )
+
+        c.execute(
+
+            """CREATE TABLE IF NOT EXISTS classes (
+
+                   name TEXT UNIQUE
+
+               )"""
+
+        )
+
+        c.execute(
+
+            """CREATE TABLE IF NOT EXISTS mounts (
+
+                   username TEXT,
+
+                   mount_path TEXT,
+
+                   source_path TEXT,
+
+                   PRIMARY KEY(username, mount_path)
+
+               )"""
+
+        )
+
+        c.execute(
+
+            """CREATE TABLE IF NOT EXISTS teacher_classes (
+
+                   teacher TEXT,
+
+                   class_name TEXT,
+
+                   UNIQUE(teacher, class_name)
+
+               )"""
+
+        )
+
+        conn.commit()
+
+        conn.close()
+
+
+
+    def ensure_groups(self):
+
+        self.run_cmd(["groupadd", "-f", "teachers"])
+
+        self.run_cmd(["groupadd", "-f", "students"])
+
+
+
+    def ensure_samba(self):
+
+        if subprocess.run(["which", "smbd"], capture_output=True).returncode != 0:
+
+            print("installing samba...")
+
+            self.run_cmd(["apt", "update"])
+
+            self.run_cmd(["apt", "install", "-y", "samba"])
+
+
+
+    def run_cmd(self, cmd, input=None, check=True):
+
+        full_cmd = ["sudo"] + cmd
+
+        try:
+
+            result = subprocess.run(
+
+                full_cmd,
+
+                input=input,
+
+                check=check,
+
+                capture_output=True,
+
+                text=True,
+
+            )
+
+            return True, result.stdout
+
+        except subprocess.CalledProcessError as e:
+
+            return False, e.stderr
+
+
+
+    def create_base_structure(self):
+
+        for d in ["for_teachers", "classes", "teachers", "students"]:
+
+            (self.base / d).mkdir(exist_ok=True)
+
+        # базовый каталог
+
+        self.run_cmd(["chmod", "750", str(self.base)])
+
+        self.run_cmd(["chown", "root:users", str(self.base)])
+
+        # закрываем служебные каталоги для студентов
+
+        self.run_cmd(["chown", "root:teachers", str(self.base / "teachers")])
+
+        self.run_cmd(["chmod", "770", str(self.base / "teachers")])
+
+        self.run_cmd(["chown", "root:teachers", str(self.base / "for_teachers")])
+
+        self.run_cmd(["chmod", "770", str(self.base / "for_teachers")])
+
+        print("base directory structure created")
+
+
+
+    def update_smb_config(self):
+
+        host = socket.gethostname()
+
+        config = f"""[global]
+
+workgroup = SCHOOL
+
+server string = Safe Computer Class on {host}
+
+security = user
+
+map to guest = never
+
+hide unreadable = yes
+
+
+
+[school]
+
+path = {MOUNTS_BASE}
+
+valid users = @teachers @students
+
+writable = yes
+
+browseable = yes
+
+create mask = 0664
+
+directory mask = 0775
+
+"""
+
+        with open("/etc/samba/smb.conf", "w") as f:
+
+            f.write(config)
+
+        self.run_cmd(["systemctl", "restart", "smbd"])
+
+        self.run_cmd(["systemctl", "enable", "smbd"])
+
+        print("samba config updated and smbd restarted")
+
+
+
+    def add_class(self, class_name: str):
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute("INSERT OR IGNORE INTO classes (name) VALUES (?)", (class_name,))
+
+        conn.commit()
+
+        conn.close()
+
+
+
+        class_dir = self.base / "classes" / class_name
+
+        students_dir = self.base / "students" / class_name
+
+        class_dir.mkdir(exist_ok=True)
+
+        students_dir.mkdir(exist_ok=True)
+
+        # класс: rwx для учителей и студентов класса (через группы/ACL),
+
+        # базово 770 — дальше можно донастроить ACL, если надо
+
+        self.run_cmd(["chmod", "770", str(class_dir)])
+
+        self.run_cmd(["chmod", "770", str(students_dir)])
+
+        print(f"class {class_name} created")
+
+
+
+    def get_user_info(self, username: str):
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute(
+
+            "SELECT role, class_name FROM users WHERE username = ?", (username,)
+
+        )
+
+        result = c.fetchone()
+
+        conn.close()
+
+        return result
+
+
+
+    def get_teacher_classes(self, teacher: str):
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute(
+
+            "SELECT class_name FROM teacher_classes WHERE teacher = ?", (teacher,)
+
+        )
+
+        rows = c.fetchall()
+
+        conn.close()
+
+        return [r[0] for r in rows]
+
+
+
+    def link_teacher_class(self, teacher: str, class_name: str):
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute(
+
+            "INSERT OR IGNORE INTO teacher_classes (teacher, class_name) VALUES (?, ?)",
+
+            (teacher, class_name),
+
+        )
+
+        conn.commit()
+
+        conn.close()
+
+        print(f"teacher {teacher} linked to class {class_name}")
+
+
+
+    def unlink_teacher_class(self, teacher: str, class_name: str):
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute(
+
+            "DELETE FROM teacher_classes WHERE teacher = ? AND class_name = ?",
+
+            (teacher, class_name),
+
+        )
+
+        conn.commit()
+
+        conn.close()
+
+        print(f"teacher {teacher} unlinked from class {class_name}")
+
+
+
+    def add_user(self, username: str, role: str, class_name: str | None, uid: int, password: str):
+
+        # Unix-пользователь
+
+        try:
+
+            pw = pwd.getpwnam(username)
+
+            print(f"user {username} already exists, using system account")
+
+            uid = pw.pw_uid
+
+            home = Path(pw.pw_dir)
+
+        except KeyError:
+
+            home = self.get_user_home(username, role, class_name)
+
+            home.mkdir(parents=True, exist_ok=True)
+
+            ok, out = self.run_cmd(
+
+                [
+
+                    "useradd",
+
+                    "-m",
+
+                    "-d",
+
+                    str(home),
+
+                    "-u",
+
+                    str(uid),
+
+                    "-G",
+
+                    f"{role}s,users",
+
+                    "-s",
+
+                    "/bin/bash",
+
+                    username,
+
+                ]
+
+            )
+
+            if not ok:
+
+                print(f"failed to create system user {username}: {out}")
+
+                return False
+
+            print(f"system user {username} created with uid {uid}")
+
+
+
+        # пароль Unix
+
+        self.run_cmd(["chpasswd"], input=f"{username}:{password}\n")
+
+
+
+        # запись в SQLite
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute(
+
+            "INSERT OR REPLACE INTO users (username, role, class_name, uid) VALUES (?, ?, ?, ?)",
+
+            (username, role, class_name, uid),
+
+        )
+
+        conn.commit()
+
+        conn.close()
+
+
+
+        # Samba‑пользователь
+
+        self.add_samba_user(username, password)
+
+
+
+        # права и монтирования
+
+        self.setup_user_permissions(username, role, class_name)
+
+        self.create_user_mounts(username, role)
+
+        print(f"user {username} ({role}, uid {uid}) fully configured")
+
+        return True
+
+
+
+    def get_user_home(self, username: str, role: str, class_name: str | None) -> Path:
+
+        if role == "teacher":
+
+            return self.base / "teachers" / username
+
+        elif role == "student":
+
+            return self.base / "students" / (class_name or "") / username
+
+        else:
+
+            return self.base / "admin"
+
+
+
+    def add_samba_user(self, username: str, password: str):
+
+        cmd = [
+
+            "bash",
+
+            "-c",
+
+            f'printf "%s\\n%s\\n" "{password}" "{password}" | smbpasswd -a -s "{username}"'
+
+        ]
+
+        ok, out = self.run_cmd(cmd, check=False)
+
+        if not ok:
+
+            print(f"smbpasswd failed for {username}: {out}")
+
+            return
+
+        self.run_cmd(["smbpasswd", "-e", username], check=False)
+
+        print(f"samba password set for {username}")
+
+
+
+    def setup_user_permissions(self, username: str, role: str, class_name: str | None):
+
+        home = self.get_user_home(username, role, class_name)
+
+        self.run_cmd(["chown", "-R", f"{username}:{role}s", str(home)])
+
+
+
+        if role == "teacher":
+
+            self.run_cmd(["chmod", "-R", "770", str(home)])
+
+            # ACL для доступа учителя к for_teachers
+
+            self.run_cmd(
+
+                [
+
+                    "setfacl",
+
+                    "-R",
+
+                    "-m",
+
+                    f"u:{username}:rwx",
+
+                    str(self.base / "for_teachers"),
+
+                ]
+
+            )
+
+        elif role == "student":
+
+            # студент видит только свой home
+
+            self.run_cmd(["chmod", "-R", "700", str(home)])
+
+
+
+        # закрываем корни, чтобы hide unreadable работал красиво
+
+        self.run_cmd(["chmod", "750", str(self.base)])
+
+        self.run_cmd(["chmod", "750", str(Path(MOUNTS_BASE))])
+
+
+
+    def create_user_mounts(self, username: str, role: str):
+
+        mount_base = Path(MOUNTS_BASE) / username
+
+        mount_base.mkdir(parents=True, exist_ok=True)
+
+
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute("DELETE FROM mounts WHERE username = ?", (username,))
+
+
+
+        mounts = []
+
+
+
+        if role == "teacher":
+
+            classes = self.get_teacher_classes(username)
+
+            mounts.append((mount_base / "teachers", self.base / "teachers" / username))
+
+            mounts.append((mount_base / "for_teachers", self.base / "for_teachers"))
+
+            for cls in classes:
+
+                mounts.append((mount_base / f"class_{cls}", self.base / "classes" / cls))
+
+                mounts.append((mount_base / f"students_{cls}", self.base / "students" / cls))
+
+
+
+        elif role == "student":
+
+            info = self.get_user_info(username)
+
+            class_name = info[1] if info else None
+
+            if not class_name:
+
+                print(f"no class for student {username}, cannot create mounts")
+
+                conn.close()
+
+                return
+
+            mounts = [
+
+                (mount_base / "home", self.base / "students" / class_name / username),
+
+                (mount_base / "class", self.base / "classes" / class_name),
+
+            ]
+
+
+
+        else:
+
+            print(f"unknown role {role} for {username}, no mounts created")
+
+            conn.close()
+
+            return
+
+
+
+        for m_path, source in mounts:
+
+            m_path.mkdir(parents=True, exist_ok=True)
+
+            self.run_cmd(["mount", "--bind", str(source), str(m_path)])
+
+            c.execute(
+
+                "INSERT INTO mounts (username, mount_path, source_path) VALUES (?, ?, ?)",
+
+                (username, str(m_path), str(source)),
+
+            )
+
+
+
+        conn.commit()
+
+        conn.close()
+
+        print(f"bind mounts for {username} created in {mount_base}")
+
+
+
+    def umount_user(self, username: str):
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute("SELECT mount_path FROM mounts WHERE username = ?", (username,))
+
+        mounts = c.fetchall()
+
+        conn.close()
+
+
+
+        for (m_path,) in mounts:
+
+            self.run_cmd(["umount", m_path], check=False)
+
+
+
+        print(f"mounts for {username} unmounted")
+
+
+
+    def del_user(self, username: str):
+
+        info = self.get_user_info(username)
+
+        if not info:
+
+            print(f"user {username} not found in db")
+
+            return
+
+        role, _ = info
+
+
+
+        self.umount_user(username)
+
+        self.run_cmd(["smbpasswd", "-x", username], check=False)
+
+        self.run_cmd(["userdel", "-r", username], check=False)
+
+
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute("DELETE FROM users WHERE username = ?", (username,))
+
+        c.execute("DELETE FROM mounts WHERE username = ?", (username,))
+
+        if role == "teacher":
+
+            c.execute("DELETE FROM teacher_classes WHERE teacher = ?", (username,))
+
+        conn.commit()
+
+        conn.close()
+
+
+
+        print(f"user {username} removed")
+
+
+
+    def del_class(self, class_name: str):
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute("SELECT username FROM users WHERE class_name = ?", (class_name,))
+
+        students = c.fetchall()
+
+        c.execute(
+
+            "SELECT teacher FROM teacher_classes WHERE class_name = ?", (class_name,)
+
+        )
+
+        teachers = c.fetchall()
+
+
+
+        if students or teachers:
+
+            print(f"class {class_name} has users:")
+
+            for (u,) in students:
+
+                print(f"  student: {u}")
+
+            for (t,) in teachers:
+
+                print(f"  teacher: {t}")
+
+            print("remove or unlink them first")
+
+            conn.close()
+
+            return False
+
+
+
+        c.execute("DELETE FROM classes WHERE name = ?", (class_name,))
+
+        conn.commit()
+
+        conn.close()
+
+
+
+        class_dir = self.base / "classes" / class_name
+
+        students_dir = self.base / "students" / class_name
+
+
+
+        if class_dir.exists() and not any(class_dir.iterdir()):
+
+            class_dir.rmdir()
+
+        if students_dir.exists() and not any(students_dir.iterdir()):
+
+            students_dir.rmdir()
+
+
+
+        print(f"class {class_name} removed")
+
+        return True
+
+
+
+    def list_users(self):
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute("SELECT username, role, class_name, uid FROM users")
+
+        users = c.fetchall()
+
+        conn.close()
+
+
+
+        if not users:
+
+            print("no users")
+
+            return
+
+
+
+        print("users:")
+
+        print("name           role       class      uid")
+
+        print("--------------------------------------------")
+
+        for username, role, cls, uid in users:
+
+            print(f"{username:<14} {role:<9} {str(cls):<10} {str(uid):<7}")
+
+
+
+    def list_classes(self):
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute("SELECT name FROM classes")
+
+        classes = c.fetchall()
+
+        conn.close()
+
+
+
+        print("classes:")
+
+        if not classes:
+
+            print("  (none)")
+
+            return
+
+        for (name,) in classes:
+
+            print(f"  {name}")
+
+
+
+    def status(self):
+
+        print("status:")
+
+        self.list_users()
+
+        self.list_classes()
+
+        result = subprocess.run(
+
+            ["systemctl", "is-active", "smbd"], capture_output=True, text=True
+
+        )
+
+        state = "active" if result.returncode == 0 else "inactive"
+
+        print(f"smbd: {state}")
+
+
+
+    def backup(self):
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        backup_path = f"{SAMBA_BASE}/school_backup_{ts}.db"
+
+        src = sqlite3.connect(DB_PATH)
+
+        dst = sqlite3.connect(backup_path)
+
+        src.backup(dst)
+
+        src.close()
+
+        dst.close()
+
+        print(f"db backup created: {backup_path}")
+
+
+
+
+
+def main():
+
+    parser = argparse.ArgumentParser(
+
+        description="Safe Computer Class v0.5", add_help=False
+
+    )
+
+    parser.add_argument(
+
+        "command",
+
+        nargs="?",
+
+        choices=[
+
+            "init",
+
+            "addteacher",
+
+            "addteacherclass",
+
+            "delteacherclass",
+
+            "addstudent",
+
+            "addclass",
+
+            "delclass",
+
+            "deluser",
+
+            "umount",
+
+            "mount",
+
+            "list",
+
+            "listclasses",
+
+            "status",
+
+            "restart",
+
+            "backup",
+
+            "help",
+
+        ],
+
+    )
+
+    parser.add_argument("args", nargs="*", help="command args")
+
+    args = parser.parse_args()
+
+
+
+    if args.command is None or args.command == "help":
+
+        school = SchoolSamba()
+
+        school.print_help()
+
+        return
+
+
+
+    school = SchoolSamba()
+
+
+
+    if args.command == "init":
+
+        school.ensure_samba()
+
+        school.create_base_structure()
+
+        school.update_smb_config()
+
+        print("system initialized")
+
+
+
+    elif args.command == "addteacher" and len(args.args) == 3:
+
+        name, uid, pw = args.args
+
+        school.add_user(name, "teacher", None, int(uid), pw)
+
+
+
+    elif args.command == "addteacherclass" and len(args.args) == 2:
+
+        teacher, cls = args.args
+
+        school.link_teacher_class(teacher, cls)
+
+        school.create_user_mounts(teacher, "teacher")
+
+
+
+    elif args.command == "delteacherclass" and len(args.args) == 2:
+
+        teacher, cls = args.args
+
+        school.unlink_teacher_class(teacher, cls)
+
+        school.create_user_mounts(teacher, "teacher")
+
+
+
+    elif args.command == "addstudent" and len(args.args) == 4:
+
+        name, cls, uid, pw = args.args
+
+        school.add_user(name, "student", cls, int(uid), pw)
+
+
+
+    elif args.command == "addclass" and len(args.args) == 1:
+
+        school.add_class(args.args[0])
+
+
+
+    elif args.command == "delclass" and len(args.args) == 1:
+
+        school.del_class(args.args[0])
+
+
+
+    elif args.command == "deluser" and len(args.args) == 1:
+
+        school.del_user(args.args[0])
+
+
+
+    elif args.command == "umount" and len(args.args) == 1:
+
+        school.umount_user(args.args[0])
+
+
+
+    elif args.command == "mount" and len(args.args) == 1:
+
+        info = school.get_user_info(args.args[0])
+
+        if not info:
+
+            print("user not found in db")
+
+        else:
+
+            role, _ = info
+
+            school.create_user_mounts(args.args[0], role)
+
+            print(f"user {args.args[0]} remounted")
+
+
+
+    elif args.command == "list":
+
+        school.list_users()
+
+
+
+    elif args.command == "listclasses":
+
+        school.list_classes()
+
+
+
+    elif args.command == "status":
+
+        school.status()
+
+
+
+    elif args.command == "restart":
+
+        school.update_smb_config()
+
+
+
+    elif args.command == "backup":
+
+        school.backup()
+
+
+
+    else:
+
+        school.print_help()
+
+
+
+
+
+if __name__ == "__main__":
+
+    main()
+
