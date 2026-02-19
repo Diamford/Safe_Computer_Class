@@ -1,5 +1,6 @@
 import logging
 import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -66,6 +67,68 @@ def setup_logger() -> logging.Logger:
 
 
 LOGGER = setup_logger()
+
+
+def _run_cmd(cmd: str) -> tuple[bool, str]:
+    """
+    Запуск shell‑команды и возврат (ok, stdout/stderr).
+
+    Используется для подключения SMB‑шары так же, как в mb_mount.py.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            shell=True,
+        )
+        return True, result.stdout
+    except subprocess.CalledProcessError as exc:
+        return False, exc.stderr
+
+
+def mount_school_drive_from_env() -> None:
+    """
+    Подключает SMB‑шару "school" к сетевому диску, как в mb_mount.py.
+
+    Параметры берутся из переменных окружения:
+      - SAFE_CLASS_SERVER  (обязателен), пример: 192.168.0.10
+      - SAFE_CLASS_USER    (обязателен)
+      - SAFE_CLASS_PASS    (может быть пустым)
+      - SAFE_CLASS_DRIVE   (необязателен, по умолчанию "Z:")
+
+    При ошибке только логируем, работу демона не останавливаем.
+    """
+    server = os.environ.get("SAFE_CLASS_SERVER", "").strip()
+    username = os.environ.get("SAFE_CLASS_USER", "").strip()
+    password = os.environ.get("SAFE_CLASS_PASS", "")
+    drive_letter = os.environ.get("SAFE_CLASS_DRIVE", "Z:").strip() or "Z:"
+
+    if not server or not username:
+        LOGGER.info(
+            "Параметры SMB не заданы (SAFE_CLASS_SERVER/SAFE_CLASS_USER), "
+            "подключение сетевого диска пропущено"
+        )
+        return
+
+    unc = f"\\\\{server}\\school"
+    cmd = (
+        f'net use {drive_letter} "{unc}" "{password}" '
+        f'/user:"{username}" /persistent:no'
+    )
+
+    LOGGER.info(
+        "Подключение SMB‑шары %s к диску %s для пользователя %s",
+        unc,
+        drive_letter,
+        username,
+    )
+    ok, msg = _run_cmd(cmd)
+    if ok:
+        LOGGER.info("SMB‑шара успешно подключена: %s", msg.strip())
+    else:
+        LOGGER.error("Ошибка подключения SMB‑шары: %s", msg.strip())
 
 
 class PinDialog(QtWidgets.QDialog):
@@ -211,6 +274,14 @@ class HookThread(threading.Thread):
 
 def main() -> int:
     LOGGER.info("Запуск PIN‑демона")
+
+    # Пытаемся подключить SMB‑шару так же, как это делает mb_mount.py.
+    # Параметры берутся из переменных окружения, см. mount_school_drive_from_env().
+    if os.name == "nt":
+        try:
+            mount_school_drive_from_env()
+        except Exception:
+            LOGGER.exception("Не удалось выполнить подключение SMB‑шары при старте демона")
 
     app = QtWidgets.QApplication(sys.argv)
     controller = DaemonController(app)
