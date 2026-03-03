@@ -240,6 +240,32 @@ def mount_school_drive_from_env() -> None:
         LOGGER.error("Ошибка подключения SMB‑шары: %s", msg.strip())
 
 
+def umount_school_drive_from_env() -> None:
+    """
+    Отключает сетевой диск, подключённый к SMB‑шаре "school".
+
+    Буква диска берётся из SAFE_CLASS_DRIVE (по умолчанию "Z:").
+    Функция безопасно логирует только факт операции и результат.
+    """
+    drive_letter = os.environ.get("SAFE_CLASS_DRIVE", "Z:").strip() or "Z:"
+
+    if os.name != "nt":
+        # На Linux этот шаг не нужен, просто выходим.
+        LOGGER.info(
+            "Отключение SMB‑диска пропущено: umount_school_drive_from_env "
+            "актуален только для Windows"
+        )
+        return
+
+    cmd = f"net use {drive_letter} /delete /y"
+    LOGGER.info("Отключение SMB‑диска %s командой: %s", drive_letter, cmd)
+    ok, msg = _run_cmd(cmd)
+    if ok:
+        LOGGER.info("SMB‑диск %s успешно отключён: %s", drive_letter, msg.strip())
+    else:
+        LOGGER.error("Не удалось отключить SMB‑диск %s: %s", drive_letter, msg.strip())
+
+
 class PinDialog(QtWidgets.QDialog):
     """
     Простое диалоговое окно для ввода PIN.
@@ -580,6 +606,12 @@ def main() -> int:
         exit_code = 1
     finally:
         rfid_thread.stop()
+        try:
+            umount_school_drive_from_env()
+        except Exception:
+            LOGGER.exception(
+                "Ошибка при попытке отключить SMB‑диск при завершении демона"
+            )
         LOGGER.info("PIN‑демон завершает работу с кодом %s", exit_code)
 
     return exit_code
