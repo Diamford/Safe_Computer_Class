@@ -41,6 +41,21 @@ class SchoolSamba:
 
         self.ensure_groups()
 
+        # Автоинициализация структуры и Samba при первом запуске.
+        # Это избавляет от необходимости вручную вызывать "init" перед "serve".
+        classes_dir = self.base / "classes"
+        students_dir = self.base / "students"
+        teachers_dir = self.base / "teachers"
+        if not (classes_dir.exists() and students_dir.exists() and teachers_dir.exists()):
+            self.create_base_structure()
+            try:
+                self.ensure_samba()
+                self.update_smb_config()
+            except Exception as e:
+                # Если установка/перезапуск Samba не удались, не ломаем основной сценарий,
+                # но выводим сообщение в консоль.
+                print(f"warning: samba auto-init failed: {e}")
+
 
 
     def print_help(self):
@@ -598,6 +613,9 @@ directory mask = 0775
 
         self.run_cmd(["chmod", "750", str(self.base)])
 
+        # корень монтирования должен быть доступен группе users,
+        # иначе учителя/ученики не смогут войти в свой каталог внутри share
+        self.run_cmd(["chown", "root:users", str(Path(MOUNTS_BASE))])
         self.run_cmd(["chmod", "750", str(Path(MOUNTS_BASE))])
 
         # Для админов даём полный доступ к монтам.
