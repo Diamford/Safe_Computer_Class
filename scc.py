@@ -5,19 +5,14 @@
 
 
 import sys
-
+import json
 import subprocess
-
 import pwd
-
 import sqlite3
-
 from pathlib import Path
-
 import argparse
-
 from datetime import datetime
-
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import socket
 
 
@@ -96,6 +91,8 @@ class SchoolSamba:
 
             "  backup                           backup database",
 
+            "  serve [host] [port]             run HTTP server for RFID/PIN",
+
             "  help                             show this help",
 
         ]
@@ -111,61 +108,47 @@ class SchoolSamba:
         c = conn.cursor()
 
         c.execute(
-
             """CREATE TABLE IF NOT EXISTS users (
-
                    id INTEGER PRIMARY KEY,
-
                    username TEXT UNIQUE,
-
                    role TEXT,
-
                    class_name TEXT,
-
                    uid INTEGER
-
                )"""
-
         )
 
         c.execute(
-
             """CREATE TABLE IF NOT EXISTS classes (
-
                    name TEXT UNIQUE
-
                )"""
-
         )
 
         c.execute(
-
             """CREATE TABLE IF NOT EXISTS mounts (
-
                    username TEXT,
-
                    mount_path TEXT,
-
                    source_path TEXT,
-
                    PRIMARY KEY(username, mount_path)
-
                )"""
-
         )
 
         c.execute(
-
             """CREATE TABLE IF NOT EXISTS teacher_classes (
-
                    teacher TEXT,
-
                    class_name TEXT,
-
                    UNIQUE(teacher, class_name)
-
                )"""
+        )
 
+        # Привязка RFID‑карт к пользователям (для mb_mount.py и daemon.pyw).
+        # card_hash и pin_hash уже приходят хешированными на клиенте.
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS cards (
+                   card_hash TEXT PRIMARY KEY,
+                   username  TEXT NOT NULL,
+                   pin_hash  TEXT NOT NULL,
+                   FOREIGN KEY(username) REFERENCES users(username)
+               )"""
         )
 
         conn.commit()
@@ -179,6 +162,7 @@ class SchoolSamba:
         self.run_cmd(["groupadd", "-f", "teachers"])
 
         self.run_cmd(["groupadd", "-f", "students"])
+        self.run_cmd(["groupadd", "-f", "admins"])
 
 
 
@@ -244,6 +228,12 @@ class SchoolSamba:
 
         self.run_cmd(["chmod", "770", str(self.base / "for_teachers")])
 
+        # Администраторам выдаём полный доступ ко всей структуре через ACL.
+        self.run_cmd(
+            ["setfacl", "-R", "-m", "g:admins:rwx", str(self.base)],
+            check=False,
+        )
+
         print("base directory structure created")
 
 
@@ -253,33 +243,19 @@ class SchoolSamba:
         host = socket.gethostname()
 
         config = f"""[global]
-
 workgroup = SCHOOL
-
 server string = Safe Computer Class on {host}
-
 security = user
-
 map to guest = never
-
 hide unreadable = yes
 
-
-
 [school]
-
 path = {MOUNTS_BASE}
-
-valid users = @teachers @students
-
+valid users = @teachers @students @admins
 writable = yes
-
 browseable = yes
-
 create mask = 0664
-
 directory mask = 0775
-
 """
 
         with open("/etc/samba/smb.conf", "w") as f:
@@ -316,12 +292,20 @@ directory mask = 0775
 
         students_dir.mkdir(exist_ok=True)
 
-        # класс: rwx для учителей и студентов класса (через группы/ACL),
-
-        # базово 770 — дальше можно донастроить ACL, если надо
-
+        # Папка класса:
+        #  - учителя: чтение/запись;
+        #  - ученики: чтение;
+        #  - админ: полный доступ (через ACL admins выше).
+        self.run_cmd(["chown", "root:teachers", str(class_dir)])
         self.run_cmd(["chmod", "770", str(class_dir)])
+        # Даём право чтения для группы students через ACL.
+        self.run_cmd(
+            ["setfacl", "-m", "g:students:rx", str(class_dir)],
+            check=False,
+        )
 
+        # Каталог с личными папками учеников данного класса.
+        self.run_cmd(["chown", "root:teachers", str(students_dir)])
         self.run_cmd(["chmod", "770", str(students_dir)])
 
         print(f"class {class_name} created")
@@ -562,6 +546,8 @@ directory mask = 0775
 
         home = self.get_user_home(username, role, class_name)
 
+        # Базовый владелец — сам пользователь, роль отражается в основной группе,
+        # дополнительный доступ раздаём через ACL.
         self.run_cmd(["chown", "-R", f"{username}:{role}s", str(home)])
 
 
@@ -592,9 +578,19 @@ directory mask = 0775
 
         elif role == "student":
 
-            # студент видит только свой home
+            # Ученик: чтение/запись своей папки, учителя могут помогать в его каталоге.
 
             self.run_cmd(["chmod", "-R", "700", str(home)])
+            self.run_cmd(
+                [
+                    "setfacl",
+                    "-R",
+                    "-m",
+                    "g:teachers:rwx",
+                    str(home),
+                ],
+                check=False,
+            )
 
 
 
@@ -603,6 +599,12 @@ directory mask = 0775
         self.run_cmd(["chmod", "750", str(self.base)])
 
         self.run_cmd(["chmod", "750", str(Path(MOUNTS_BASE))])
+
+        # Для админов даём полный доступ к монтам.
+        self.run_cmd(
+            ["setfacl", "-R", "-m", "g:admins:rwx", str(Path(MOUNTS_BASE))],
+            check=False,
+        )
 
 
 
@@ -940,6 +942,155 @@ directory mask = 0775
 
 
 
+    # --- Работа с RFID‑картами и PIN через SQLite, для mb_mount.py и daemon.pyw ---
+
+    def register_card(self, username: str, card_hash: str, pin_hash: str) -> tuple[bool, str]:
+        """
+        Регистрирует (или перезаписывает) RFID‑карту для пользователя.
+
+        Используется HTTP‑эндпоинтом /api/scc/register_card.
+        """
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+
+        c.execute("SELECT 1 FROM users WHERE username = ?", (username,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return False, "user not found"
+
+        c.execute(
+            "INSERT OR REPLACE INTO cards (card_hash, username, pin_hash) VALUES (?, ?, ?)",
+            (card_hash, username, pin_hash),
+        )
+        conn.commit()
+        conn.close()
+        return True, "card registered"
+
+    def verify_card(self, card_hash: str) -> tuple[bool, bool]:
+        """
+        Проверка существования карты.
+
+        Возвращает (exists, require_pin). Пока всегда требуем PIN, но
+        интерфейс оставляем расширяемым.
+        Используется HTTP‑эндпоинтом /api/scc/verify_card.
+        """
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT username FROM cards WHERE card_hash = ?", (card_hash,))
+        row = c.fetchone()
+        conn.close()
+        if not row:
+            return False, False
+        # На первом этапе всегда требуем PIN.
+        return True, True
+
+    def verify_pin(self, card_hash: str, pin_hash: str) -> bool:
+        """
+        Проверка PIN по хешу карты.
+
+        Клиент уже передаёт SHA‑256(PIN) (см. daemon.pyw), здесь мы
+        сравниваем только хеши один к одному.
+        Используется HTTP‑эндпоинтом /api/scc/verify_pin.
+        """
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute(
+            "SELECT pin_hash FROM cards WHERE card_hash = ?",
+            (card_hash,),
+        )
+        row = c.fetchone()
+        conn.close()
+        if not row:
+            return False
+        stored_hash = row[0]
+        return stored_hash == pin_hash
+
+
+class SCCRequestHandler(BaseHTTPRequestHandler):
+    """
+    HTTP‑сервер без внешних зависимостей, который даёт REST‑эндпоинты
+    для клиентов mb_mount.py и daemon.pyw:
+
+      - POST /api/scc/register_card  {username, card_hash, pin_hash}
+      - POST /api/scc/verify_card    {card_hash}
+      - POST /api/scc/verify_pin     {card_hash, pin_hash}
+    """
+
+    # Экземпляр SchoolSamba прокидываем через атрибут класса.
+    school: "SchoolSamba | None" = None
+
+    def _send_json(self, code: int, payload: dict):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if not SCCRequestHandler.school:
+            self._send_json(500, {"ok": False, "message": "server not initialized"})
+            return
+
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw_body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            data = json.loads(raw_body.decode("utf-8") or "{}")
+        except Exception:
+            self._send_json(400, {"ok": False, "message": "invalid JSON"})
+            return
+
+        if self.path == "/api/scc/register_card":
+            username = str(data.get("username", "")).strip()
+            card_hash = str(data.get("card_hash", "")).strip()
+            pin_hash = str(data.get("pin_hash", "")).strip()
+            if not username or not card_hash or not pin_hash:
+                self._send_json(400, {"ok": False, "message": "missing fields"})
+                return
+            ok, msg = SCCRequestHandler.school.register_card(
+                username, card_hash, pin_hash
+            )
+            self._send_json(200 if ok else 400, {"ok": ok, "message": msg})
+
+        elif self.path == "/api/scc/verify_card":
+            card_hash = str(data.get("card_hash", "")).strip()
+            if not card_hash:
+                self._send_json(400, {"exists": False, "require_pin": False})
+                return
+            exists, require_pin = SCCRequestHandler.school.verify_card(card_hash)
+            self._send_json(200, {"exists": exists, "require_pin": require_pin})
+
+        elif self.path == "/api/scc/verify_pin":
+            card_hash = str(data.get("card_hash", "")).strip()
+            pin_hash = str(data.get("pin_hash", "")).strip()
+            if not card_hash or not pin_hash:
+                self._send_json(400, {"ok": False})
+                return
+            ok = SCCRequestHandler.school.verify_pin(card_hash, pin_hash)
+            self._send_json(200, {"ok": ok})
+
+        else:
+            self._send_json(404, {"ok": False, "message": "not found"})
+
+
+def run_http_server(host: str, port: int):
+    """
+    Запуск HTTP‑сервера для работы с mb_mount.py и daemon.pyw.
+
+    Пример:
+        sudo python3 scc.py serve 0.0.0.0 8000
+    """
+    school = SchoolSamba()
+    SCCRequestHandler.school = school
+    httpd = HTTPServer((host, port), SCCRequestHandler)
+    print(f"HTTP server running on http://{host}:{port}")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("HTTP server stopped")
+    finally:
+        httpd.server_close()
 
 
 def main():
@@ -987,6 +1138,8 @@ def main():
             "restart",
 
             "backup",
+
+            "serve",
 
             "help",
 
@@ -1131,6 +1284,24 @@ def main():
     elif args.command == "backup":
 
         school.backup()
+
+    elif args.command == "serve":
+
+        # Простой HTTP‑сервер для работы с mb_mount.py и daemon.pyw.
+
+        host = "0.0.0.0"
+
+        port = 8000
+
+        if len(args.args) >= 1:
+
+            host = args.args[0]
+
+        if len(args.args) >= 2:
+
+            port = int(args.args[1])
+
+        run_http_server(host, port)
 
 
 
