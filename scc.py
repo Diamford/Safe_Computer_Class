@@ -174,10 +174,19 @@ class SchoolSamba:
 
     def ensure_groups(self):
 
+        # Базовые группы ролей.
         self.run_cmd(["groupadd", "-f", "teachers"])
 
         self.run_cmd(["groupadd", "-f", "students"])
+
         self.run_cmd(["groupadd", "-f", "admins"])
+
+        # Общая группа "users", которую мы используем как группу
+        # для корня монтирований (/srv/samba_mounts). Без неё chown
+        # root:users /srv/samba_mounts в setup_user_permissions
+        # падает, и в итоге каталог остаётся root:root, из‑за чего
+        # Samba отдаёт ACCESS_DENIED при входе в \\server\school.
+        self.run_cmd(["groupadd", "-f", "users"])
 
 
 
