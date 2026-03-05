@@ -61,9 +61,9 @@ void computeSHA256(const uint8_t *data, size_t len, uint8_t outHash[32]) {
   mbedtls_sha256_init(&ctx);
 
   // 0 = SHA-256, 1 = SHA-224
-  mbedtls_sha256_starts_ret(&ctx, 0);
-  mbedtls_sha256_update_ret(&ctx, data, len);
-  mbedtls_sha256_finish_ret(&ctx, outHash);
+  mbedtls_sha256_starts(&ctx, 0);
+  mbedtls_sha256_update(&ctx, data, len);
+  mbedtls_sha256_finish(&ctx, outHash);
 
   mbedtls_sha256_free(&ctx);
 }
