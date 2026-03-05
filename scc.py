@@ -641,7 +641,18 @@ directory mask = 0775
 
         mount_base.mkdir(parents=True, exist_ok=True)
 
-
+        # Закрываем корневую папку монтирований конкретного пользователя,
+        # чтобы другие пользователи не видели его каталог внутри шары.
+        # Админам при этом оставляем полный доступ через ACL.
+        self.run_cmd(["chown", "-R", f"{username}:{role}s", str(mount_base)])
+        if role == "teacher":
+            self.run_cmd(["chmod", "770", str(mount_base)])
+        else:
+            self.run_cmd(["chmod", "700", str(mount_base)])
+        self.run_cmd(
+            ["setfacl", "-R", "-m", "g:admins:rwx", str(mount_base)],
+            check=False,
+        )
 
         conn = sqlite3.connect(DB_PATH)
 
@@ -684,6 +695,10 @@ directory mask = 0775
                 conn.close()
 
                 return
+
+            # Если класс не был заранее создан через addclass, создаём/инициализируем
+            # его структуру здесь. Повторный вызов безопасен (INSERT OR IGNORE + mkdir).
+            self.add_class(class_name)
 
             mounts = [
 
