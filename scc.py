@@ -730,19 +730,21 @@ directory mask = 0775
             # его структуру здесь. Повторный вызов безопасен (INSERT OR IGNORE + mkdir).
             self.add_class(class_name)
 
+            student_home = self.base / "students" / class_name / username
+
+            class_dir = self.base / "classes" / class_name
+
+            # Для ученика:
+            #  - корень его монтирования (\\server\school\<username>) становится его личной папкой;
+            #  - внутри неё появляется подпапка с именем класса, смонтированная из каталога класса.
             mounts = [
 
-                # Личная папка ученика под его именем.
-                (
-                    mount_base / username,
-                    self.base / "students" / class_name / username,
-                ),
+                # Корень монтирования = личная папка ученика.
+                (mount_base, student_home),
 
-                # Папка класса (только чтение для учеников, права заданы в add_class).
-                (
-                    mount_base / class_name,
-                    self.base / "classes" / class_name,
-                ),
+                # Подпапка класса внутри личной папки (только чтение для ученика,
+                # так как права заданы в add_class через ACL g:students:rx).
+                (mount_base / class_name, class_dir),
 
             ]
 
