@@ -53,7 +53,9 @@ def run_cmd(cmd):
 
 
 def mount_school_drive(server, username, password, drive_letter="Z:"):
-    unc = f"\\\\{server}\\school"
+    # Монтируем сразу личную папку пользователя внутри шары,
+    # чтобы он не видел каталоги других пользователей.
+    unc = f"\\\\{server}\\school\\{username}"
     # /persistent:no чтобы не сохранять подключение навсегда
     cmd = (
         f'net use {drive_letter} "{unc}" "{password}" /user:"{username}" /persistent:no'

@@ -376,6 +376,26 @@ directory mask = 0775
 
 
 
+    def get_class_students(self, class_name: str):
+
+        conn = sqlite3.connect(DB_PATH)
+
+        c = conn.cursor()
+
+        c.execute(
+
+            "SELECT username FROM users WHERE role = 'student' AND class_name = ?",
+            (class_name,),
+        )
+
+        rows = c.fetchall()
+
+        conn.close()
+
+        return [r[0] for r in rows]
+
+
+
     def link_teacher_class(self, teacher: str, class_name: str):
 
         conn = sqlite3.connect(DB_PATH)
@@ -676,9 +696,19 @@ directory mask = 0775
 
             for cls in classes:
 
-                mounts.append((mount_base / f"class_{cls}", self.base / "classes" / cls))
+                class_root = mount_base / cls
 
-                mounts.append((mount_base / f"students_{cls}", self.base / "students" / cls))
+                # Папка класса (учебные материалы, общие файлы).
+                mounts.append((class_root, self.base / "classes" / cls))
+
+                # Внутри папки класса — личные папки всех учеников этого класса.
+                for student in self.get_class_students(cls):
+
+                    student_src = self.base / "students" / cls / student
+
+                    student_mount = class_root / student
+
+                    mounts.append((student_mount, student_src))
 
 
 
@@ -702,9 +732,17 @@ directory mask = 0775
 
             mounts = [
 
-                (mount_base / "home", self.base / "students" / class_name / username),
+                # Личная папка ученика под его именем.
+                (
+                    mount_base / username,
+                    self.base / "students" / class_name / username,
+                ),
 
-                (mount_base / "class", self.base / "classes" / class_name),
+                # Папка класса (только чтение для учеников, права заданы в add_class).
+                (
+                    mount_base / class_name,
+                    self.base / "classes" / class_name,
+                ),
 
             ]
 

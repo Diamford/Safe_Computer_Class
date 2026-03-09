@@ -1,5 +1,5 @@
 // SCC_rfid_scanner.ino
-// ESP32-C3 + RC522 + SHA-256
+// Arduino Nano + RC522 + SHA-256
 // Протокол по Serial:
 //   ПК -> ESP:  "HELLO_SCC\n"
 //   ESP -> ПК:  "SCC_RFID_V1_OK\n"
@@ -8,17 +8,18 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <MFRC522.h>
-#include "mbedtls/sha256.h"
+#include <Crypto.h>
+#include <SHA256.h>
 
-// ===================== Пины (подстройте под свою плату) =====================
-// Для ESP32-C3 DevKit проверьте реальную распиновку и при необходимости
-// измените значения ниже.
+// ===================== Пины для Arduino Nano =====================
+// SPI на Nano/UNO аппаратно привязан:
+//   SCK  = 13
+//   MISO = 12
+//   MOSI = 11
+// Выбираем только пины SS (SDA) и RST для RC522.
 
-#define RFID_SS_PIN   7    // SDA / SS RC522
-#define RFID_RST_PIN  3    // RST RC522
-#define SPI_SCK_PIN   4
-#define SPI_MISO_PIN  5
-#define SPI_MOSI_PIN  6
+#define RFID_SS_PIN   10    // SDA / SS RC522
+#define RFID_RST_PIN  9     // RST RC522
 
 // ===================== Протокол по Serial =====================
 
@@ -57,15 +58,10 @@ String serialLine;
 
 // SHA-256(data) -> outHash[32]
 void computeSHA256(const uint8_t *data, size_t len, uint8_t outHash[32]) {
-  mbedtls_sha256_context ctx;
-  mbedtls_sha256_init(&ctx);
-
-  // 0 = SHA-256, 1 = SHA-224
-  mbedtls_sha256_starts(&ctx, 0);
-  mbedtls_sha256_update(&ctx, data, len);
-  mbedtls_sha256_finish(&ctx, outHash);
-
-  mbedtls_sha256_free(&ctx);
+  SHA256 hasher;
+  hasher.reset();
+  hasher.update(data, len);
+  hasher.finalize(outHash, 32);
 }
 
 // Преобразовать байты в HEX-строку (верхний регистр)
@@ -183,13 +179,10 @@ void handleRFID() {
 void setup() {
   // Serial
   Serial.begin(115200);
-  while (!Serial) {
-    // ждём инициализации USB-Serial
-    delay(10);
-  }
+  // Для классического Arduino Nano ждать Serial не нужно
 
-  // Инициализация SPI для ESP32-C3
-  SPI.begin(SPI_SCK_PIN, SPI_MISO_PIN, SPI_MOSI_PIN, RFID_SS_PIN);
+  // Инициализация аппаратного SPI для Nano
+  SPI.begin();
 
   // Инициализация RC522
   mfrc522.PCD_Init();
