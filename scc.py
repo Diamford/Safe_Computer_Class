@@ -1160,8 +1160,16 @@ def run_http_server(host: str, port: int):
     """
     Запуск HTTP‑сервера для работы с mb_mount.py и daemon.pyw.
 
-    Пример:
-        sudo python3 scc.py serve 0.0.0.0 8000
+    По умолчанию сервер слушает порт 80, чтобы клиенты могли
+    обращаться по адресу вида:
+
+        http://<server>/api/scc/register_card
+
+    Примеры запуска:
+
+        sudo python3 scc.py serve             # 0.0.0.0:80
+        sudo python3 scc.py serve 0.0.0.0     # 0.0.0.0:80
+        sudo python3 scc.py serve 0.0.0.0 8000  # явный нестандартный порт
     """
     school = SchoolSamba()
     SCCRequestHandler.school = school
@@ -1373,7 +1381,9 @@ def main():
 
         host = "0.0.0.0"
 
-        port = 8000
+        # По умолчанию слушаем порт 80, чтобы клиенты могли
+        # обращаться по адресу без явного указания порта.
+        port = 80
 
         if len(args.args) >= 1:
 
