@@ -89,22 +89,25 @@ def _open_rfid_port(preferred_port: str | None = None) -> "serial.Serial | None"
     def _try_open_and_handshake(port_name: str) -> "serial.Serial | None":
         # Отладочный вывод: какой порт пробуем открыть
         print(f"[RFID] trying port {port_name}")
+        ser: "serial.Serial | None" = None
         try:
-            ser = serial.Serial(port_name, 115200, timeout=2)
+            ser = serial.Serial(port_name, 115200, timeout=1)
 
-            # Для Arduino Nano открытие порта может вызывать reset,
-            # поэтому даём плате время загрузиться и "выговориться".
-            boot_deadline = time.time() + 2.0
+            # Для Arduino открытие порта может вызывать reset,
+            # поэтому даём плате немного времени "выговориться".
+            boot_deadline = time.time() + 1.0
             while time.time() < boot_deadline:
                 line = ser.readline().decode("utf-8", "ignore").strip()
                 if not line:
                     continue
                 print(f"[RFID] boot line on {port_name!r}: {line!r}")
 
-            # Теперь пробуем нормальное рукопожатие.
+            # Теперь пробуем нормальное рукопожатие (укороченный таймаут).
             ser.reset_input_buffer()
-            ser.write(b"HELLO_SCC\n")
+            # Некоторые версии прошивки ожидают CRLF, поэтому шлём \r\n.
+            ser.write(b"HELLO_SCC\r\n")
             deadline = time.time() + 5.0
+            saw_wait_state = False
             while time.time() < deadline:
                 line = ser.readline().decode("utf-8", "ignore").strip()
                 if not line:
@@ -113,13 +116,28 @@ def _open_rfid_port(preferred_port: str | None = None) -> "serial.Serial | None"
                 if line == "SCC_RFID_V1_OK":
                     print(f"[RFID] handshake OK on {port_name}")
                     return ser
+                if "WAIT_HANDSHAKE" in line or "SCC RFID device booted" in line:
+                    # Это явные строки от прошивки нашего устройства.
+                    # Если формального ответа SCC_RFID_V1_OK нет, но мы
+                    # получили эти строки, считаем порт корректным и
+                    # продолжаем дальше читать CARD_HASH уже вне рукопожатия.
+                    saw_wait_state = True
                 if line.startswith("ERR:"):
                     print(f"[RFID] handshake error on {port_name}: {line!r}")
                     break
+
+            if saw_wait_state:
+                print(
+                    f"[RFID] fallback: using port {port_name} "
+                    f"after WAIT_HANDSHAKE/boot messages without SCC_RFID_V1_OK"
+                )
+                return ser
+
             ser.close()
         except Exception:
             try:
-                ser.close()
+                if ser is not None:
+                    ser.close()
             except Exception:
                 pass
         return None
@@ -139,8 +157,17 @@ def _open_rfid_port(preferred_port: str | None = None) -> "serial.Serial | None"
             return ser
         # если рукопожатие не удалось — тихо падаем на автопоиск
 
-    for port in list_ports.comports():
-        dev = port.device
+    # Список доступных портов с приоритетом более "подходящих".
+    ports = [p.device for p in list_ports.comports()]
+    # Приоритетный список можем расширять по мере необходимости.
+    priority = ["COM12", "COM11", "COM10"]
+
+    def _sort_key(dev: str) -> tuple[int, int]:
+        if dev in priority:
+            return (0, priority.index(dev))
+        return (1, 0)
+
+    for dev in sorted(ports, key=_sort_key):
         ser = _try_open_and_handshake(dev)
         if ser is not None:
             return ser
@@ -168,7 +195,26 @@ def read_card_hash_once(timeout_seconds: float = 60.0, preferred_port: str | Non
         return None
 
     try:
-        # после успешного рукопожатия ждём строку CARD_HASH:
+        # Дополнительное рукопожатие ПЕРЕД ожиданием карты, чтобы
+        # гарантированно перевести прошивку из WAIT_HANDSHAKE в WAIT_CARD.
+        try:
+            ser.reset_input_buffer()
+            ser.write(b"HELLO_SCC\r\n")
+            handshake_deadline = time.time() + 2.0
+            while time.time() < handshake_deadline:
+                line = ser.readline().decode("utf-8", "ignore").strip()
+                if not line:
+                    continue
+                print(f"[RFID] second-stage handshake: {line!r}")
+                if line == "SCC_RFID_V1_OK":
+                    print("[RFID] second-stage handshake OK")
+                    break
+        except Exception:
+            # Не рвём основное ожидание карты, даже если рукопожатие
+            # отработало неидеально — прошивка всё равно примет HELLO_SCC.
+            pass
+
+        # после рукопожатия ждём строку CARD_HASH:
         prefix = "CARD_HASH:"
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:

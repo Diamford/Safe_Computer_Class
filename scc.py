@@ -6,6 +6,7 @@
 
 import sys
 import json
+import os
 import subprocess
 import pwd
 import sqlite3
@@ -1088,6 +1089,55 @@ directory mask = 0775
         stored_hash = row[0]
         return stored_hash == pin_hash
 
+    def auth_uuid_pin(self, uuid: str, pin_hash: str) -> tuple[bool, dict]:
+        """
+        Авторизация по UUID (card_hash) + PIN (уже SHA‑256, HEX).
+
+        Это серверная часть для daemon.pyw (см. auth_with_uuid_and_pin):
+          POST /api/scc/auth  { "uuid": "<CARD_HASH>", "pin_hash": "<HEX_SHA256(PIN)>" }
+
+        Возвращаем:
+          - ok: true/false
+          - server/username/drive_letter: по возможности (password можно не возвращать,
+            тогда daemon.pyw использует fallback монтирования по переменным окружения).
+        """
+        uuid = (uuid or "").strip()
+        pin_hash = (pin_hash or "").strip()
+        if not uuid or not pin_hash:
+            return False, {}
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute(
+            "SELECT username, pin_hash FROM cards WHERE card_hash = ?",
+            (uuid,),
+        )
+        row = c.fetchone()
+        conn.close()
+
+        if not row:
+            return False, {}
+
+        username, stored_pin_hash = row
+        if stored_pin_hash != pin_hash:
+            return False, {}
+
+        # server: лучше явно задавать в env, иначе отдаём hostname сервера
+        smb_server = (
+            os.environ.get("SAFE_CLASS_SMB_SERVER", "").strip()
+            or os.environ.get("SAFE_CLASS_SERVER", "").strip()
+            or socket.gethostname()
+        )
+        drive_letter = os.environ.get("SAFE_CLASS_DRIVE", "Z:").strip() or "Z:"
+
+        return True, {
+            "server": smb_server,
+            "username": str(username),
+            # password намеренно не возвращаем (не храним в БД).
+            # daemon.pyw корректно уйдёт в fallback mount_school_drive_from_env.
+            "drive_letter": drive_letter,
+        }
+
 
 class SCCRequestHandler(BaseHTTPRequestHandler):
     """
@@ -1151,6 +1201,16 @@ class SCCRequestHandler(BaseHTTPRequestHandler):
                 return
             ok = SCCRequestHandler.school.verify_pin(card_hash, pin_hash)
             self._send_json(200, {"ok": ok})
+
+        elif self.path == "/api/scc/auth":
+            # Для daemon.pyw: UUID == card_hash.
+            uuid = str(data.get("uuid", "")).strip() or str(data.get("card_hash", "")).strip()
+            pin_hash = str(data.get("pin_hash", "")).strip()
+            ok, payload = SCCRequestHandler.school.auth_uuid_pin(uuid, pin_hash)
+            if ok:
+                self._send_json(200, {"ok": True, **payload})
+            else:
+                self._send_json(200, {"ok": False})
 
         else:
             self._send_json(404, {"ok": False, "message": "not found"})

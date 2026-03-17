@@ -10,16 +10,11 @@ from pathlib import Path
 from PyQt6 import QtCore, QtWidgets
 
 try:
-    import serial  # связь с ESP32‑C3 по COM‑порту
-    from serial.tools import list_ports
-except ImportError:
-    serial = None
-    list_ports = None
-
-try:
     import requests  # HTTP‑клиент для общения с сервером
 except ImportError:
     requests = None
+
+from mb_mount import read_card_hash_once, register_card_on_server, mount_school_drive
 
 
 LOG_DIR_WINDOWS = os.path.join(
@@ -178,6 +173,75 @@ def verify_pin_on_server(card_hash: str, pin: str) -> bool:
         return False
 
 
+def auth_with_uuid_and_pin(card_hash: str, pin: str) -> tuple[bool, dict]:
+    """
+    Единый запрос авторизации по UUID (хеш карты) и PIN.
+
+    Эндпоинт задаётся переменной окружения SAFE_CLASS_AUTH_URL.
+    Формат запроса:
+      { "uuid": "<CARD_HASH>", "pin_hash": "<HEX_SHA256(PIN)>" }
+
+    Ожидаемый ответ:
+      {
+        "ok": true/false,
+        "server": "192.168.0.10",
+        "username": "student01",
+        "password": "secret",
+        "drive_letter": "Z:"   # необязательное поле
+      }
+    """
+    url = os.environ.get("SAFE_CLASS_AUTH_URL", "").strip()
+
+    if not url:
+        LOGGER.error(
+            "SAFE_CLASS_AUTH_URL не задан — авторизация по UUID+PIN невозможна"
+        )
+        return False, {}
+
+    if requests is None:
+        LOGGER.error(
+            "Библиотека 'requests' не установлена — авторизация по UUID+PIN невозможна"
+        )
+        return False, {}
+
+    pin_hash = _sha256_hex(pin)
+
+    try:
+        resp = requests.post(
+            url,
+            json={"uuid": card_hash, "pin_hash": pin_hash},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        ok = bool(data.get("ok"))
+        if not ok:
+            LOGGER.warning("Сервер отклонил авторизацию по UUID+PIN")
+            return False, {}
+
+        server = str(data.get("server", "")).strip()
+        username = str(data.get("username", "")).strip()
+        password = str(data.get("password", ""))
+        drive_letter = str(data.get("drive_letter", "")).strip() or "Z:"
+
+        LOGGER.info(
+            "Сервер подтвердил авторизацию: server=%s, username=%s, drive=%s",
+            server,
+            username,
+            drive_letter,
+        )
+
+        return True, {
+            "server": server,
+            "username": username,
+            "password": password,
+            "drive_letter": drive_letter,
+        }
+    except Exception:
+        LOGGER.exception("Ошибка HTTP‑запроса при авторизации по UUID+PIN")
+        return False, {}
+
+
 def _run_cmd(cmd: str) -> tuple[bool, str]:
     """
     Запуск shell‑команды и возврат (ok, stdout/stderr).
@@ -220,8 +284,8 @@ def mount_school_drive_from_env() -> None:
             "подключение сетевого диска пропущено"
         )
         return
-
-    unc = f"\\\\{server}\\school"
+    # Как в mb_mount.py: монтируем сразу личную папку пользователя.
+    unc = f"\\\\{server}\\school\\{username}"
     cmd = (
         f'net use {drive_letter} "{unc}" "{password}" '
         f'/user:"{username}" /persistent:no'
@@ -321,6 +385,18 @@ class DaemonController(QtCore.QObject):
         self.app = app
         self._dialog: PinDialog | None = None
         self._current_card_hash: str | None = None
+        # Режим работы демона:
+        #   - "auth" (по умолчанию) — авторизация по UUID+PIN и монтирование диска
+        #   - "register" — регистрация карты за пользователем (как в mb_mount.py)
+        self._mode: str = (
+            os.environ.get("SAFE_CLASS_DAEMON_MODE", "auth").strip() or "auth"
+        )
+        LOGGER.info("DaemonController mode: %s", self._mode)
+        # SMB‑параметры, полученные от сервера при успешной авторизации
+        self._smb_server: str | None = None
+        self._smb_username: str | None = None
+        self._smb_password: str | None = None
+        self._smb_drive: str | None = None
 
     @QtCore.pyqtSlot()
     def show_pin_dialog(self) -> None:
@@ -343,6 +419,26 @@ class DaemonController(QtCore.QObject):
 
         if os.name == "nt":
             try:
+                # Если сервер вернул SMB‑параметры, используем их.
+                if self._smb_server and self._smb_username is not None:
+                    server = self._smb_server
+                    username = self._smb_username
+                    password = self._smb_password or ""
+                    drive_letter = self._smb_drive or "Z:"
+                    LOGGER.info(
+                        "Монтируем SMB по данным с сервера: %s -> \\\\%s\\school\\%s",
+                        drive_letter,
+                        server,
+                        username,
+                    )
+                    ok, msg = mount_school_drive(
+                        server, username, password, drive_letter=drive_letter
+                    )
+                    if not ok:
+                        LOGGER.error("Ошибка монтирования SMB‑шары: %s", msg.strip())
+                    return
+
+                # Fallback: старый режим через переменные окружения.
                 mount_school_drive_from_env()
             except Exception:
                 LOGGER.exception(
@@ -358,22 +454,19 @@ class DaemonController(QtCore.QObject):
         """
         try:
             LOGGER.info("Получен хеш карты (длина: %d символов)", len(card_hash))
-
-            exists, require_pin = verify_card_hash(card_hash)
-            if not exists:
-                LOGGER.warning("Карта не найдена на сервере")
-                return
-
             self._current_card_hash = card_hash
 
-            if require_pin:
-                LOGGER.info("Сервер требует ввод PIN для данной карты")
+            if self._mode == "register":
+                # Режим регистрации карты: сразу запрашиваем PIN для привязки.
+                LOGGER.info("Режим регистрации: запрашиваем PIN для новой карты")
                 self.show_pin_dialog()
-            else:
-                LOGGER.info(
-                    "Сервер не требует PIN для данной карты, доступ предоставлен"
-                )
-                self._on_auth_success()
+                return
+
+            # Обычный режим авторизации: UUID+PIN.
+            LOGGER.info(
+                "Режим авторизации: отображаем окно ввода PIN для UUID (хеша карты)"
+            )
+            self.show_pin_dialog()
         except Exception:
             LOGGER.exception("Ошибка при обработке хеша карты")
 
@@ -399,12 +492,54 @@ class DaemonController(QtCore.QObject):
                 )
                 return
 
-            ok = verify_pin_on_server(self._current_card_hash, pin)
+            if self._mode == "register":
+                # Регистрация карты для пользователя через сервер
+                server = os.environ.get("SAFE_CLASS_SERVER", "").strip()
+                username = os.environ.get("SAFE_CLASS_USER", "").strip()
+                if not server or not username:
+                    LOGGER.error(
+                        "Режим регистрации: не заданы SAFE_CLASS_SERVER/SAFE_CLASS_USER"
+                    )
+                    return
+
+                ok, msg = register_card_on_server(
+                    server, username, self._current_card_hash, pin
+                )
+                if ok:
+                    LOGGER.info(
+                        "RFID‑карта успешно зарегистрирована для пользователя %s: %s",
+                        username,
+                        msg,
+                    )
+                    QtWidgets.QMessageBox.information(
+                        None,
+                        "RFID registered",
+                        "RFID‑карта успешно зарегистрирована для этого пользователя.",
+                    )
+                else:
+                    LOGGER.error(
+                        "Ошибка регистрации RFID‑карты для пользователя %s: %s",
+                        username,
+                        msg,
+                    )
+                    QtWidgets.QMessageBox.critical(
+                        None,
+                        "RFID error",
+                        f"Не удалось зарегистрировать RFID‑карту: {msg}",
+                    )
+                return
+
+            # Обычный режим авторизации: единый запрос UUID+PIN к серверу.
+            ok, smb_data = auth_with_uuid_and_pin(self._current_card_hash, pin)
             if ok:
-                LOGGER.info("PIN успешно проверен сервером")
+                self._smb_server = smb_data.get("server") or None
+                self._smb_username = smb_data.get("username") or None
+                self._smb_password = smb_data.get("password") or ""
+                self._smb_drive = smb_data.get("drive_letter") or None
+                LOGGER.info("Авторизация по UUID+PIN успешна, монтируем диск")
                 self._on_auth_success()
             else:
-                LOGGER.warning("PIN отклонён сервером")
+                LOGGER.warning("Авторизация по UUID+PIN отклонена сервером")
         except Exception:
             LOGGER.exception("Ошибка при обработке введённого PIN")
 
@@ -428,43 +563,21 @@ class RfidThread(threading.Thread):
         super().__init__(daemon=True)
         self.controller = controller
         self._running = True
-        self._serial: "serial.Serial | None" = None
 
     def stop(self) -> None:
         self._running = False
-        if self._serial is not None:
-            try:
-                self._serial.close()
-            except Exception:
-                pass
 
     def run(self) -> None:
-        if serial is None:
-            LOGGER.error(
-                "Библиотека 'pyserial' не установлена. "
-                "Связь с ESP32‑C3 по Serial недоступна."
-            )
-            return
-
-        LOGGER.info("RFID‑поток запущен, поиск устройства ESP32‑C3...")
+        LOGGER.info("RFID‑поток запущен, ожидание карт от ESP32‑C3...")
 
         while self._running:
             try:
-                if self._serial is None:
-                    self._serial = self._open_device_port()
-                    if self._serial is None:
-                        time.sleep(5)
-                        continue
-
-                if not self._do_handshake():
-                    LOGGER.warning("Рукопожатие с устройством не удалось, переподключение")
-                    self._close_serial()
-                    time.sleep(2)
-                    continue
-
-                card_hash = self._wait_for_card_hash()
+                card_hash = read_card_hash_once(timeout_seconds=60.0)
                 if not card_hash:
-                    # либо таймаут, либо ошибка — попробуем начать всё заново
+                    LOGGER.warning(
+                        "Не удалось получить CARD_HASH от устройства (таймаут или ошибка)"
+                    )
+                    time.sleep(2.0)
                     continue
 
                 LOGGER.info("Хеш карты получен от устройства, передаём в GUI‑поток")
@@ -474,119 +587,9 @@ class RfidThread(threading.Thread):
                     QtCore.Qt.ConnectionType.QueuedConnection,
                     QtCore.Q_ARG(str, card_hash),
                 )
-
             except Exception:
                 LOGGER.exception("Необработанное исключение в RFID‑потоке")
-                self._close_serial()
-                time.sleep(2)
-
-    def _close_serial(self) -> None:
-        if self._serial is not None:
-            try:
-                self._serial.close()
-            except Exception:
-                pass
-            self._serial = None
-
-    def _open_device_port(self) -> "serial.Serial | None":
-        """
-        Открывает COM‑порт с ESP32‑C3.
-
-        Сначала пытается использовать SAFE_RFID_PORT, затем — автопоиск
-        по всем доступным портам, отправляя HELLO_SCC и ожидая
-        SCC_RFID_V1_OK в ответ.
-        """
-        if list_ports is None:
-            LOGGER.error(
-                "serial.tools.list_ports недоступен — автопоиск COM‑порта невозможен"
-            )
-            return None
-
-        env_port = os.environ.get("SAFE_RFID_PORT", "").strip()
-        if env_port:
-            LOGGER.info("Пробуем подключиться к ESP32‑C3 на порту %s", env_port)
-            try:
-                ser = serial.Serial(env_port, 115200, timeout=2)
-                return ser
-            except Exception:
-                LOGGER.exception(
-                    "Не удалось открыть порт из SAFE_RFID_PORT: %s", env_port
-                )
-
-        LOGGER.info("Поиск ESP32‑C3 по доступным COM‑портам")
-        for port in list_ports.comports():
-            dev = port.device
-            try:
-                ser = serial.Serial(dev, 115200, timeout=2)
-                LOGGER.info("Пробная попытка рукопожатия с устройством на %s", dev)
-                ser.reset_input_buffer()
-                ser.write((self.HANDSHAKE_REQUEST + "\n").encode("utf-8"))
-                line = ser.readline().decode("utf-8", "ignore").strip()
-                if line == self.HANDSHAKE_RESPONSE:
-                    LOGGER.info("Найдено RFID‑устройство на порту %s", dev)
-                    return ser
-                ser.close()
-            except Exception:
-                LOGGER.exception("Ошибка при проверке порта %s", dev)
-
-        LOGGER.warning("RFID‑устройство не найдено ни на одном COM‑порту")
-        return None
-
-    def _do_handshake(self) -> bool:
-        """
-        HELLO_SCC / SCC_RFID_V1_OK с устройством.
-        """
-        if self._serial is None:
-            return False
-
-        try:
-            self._serial.reset_input_buffer()
-            self._serial.write((self.HANDSHAKE_REQUEST + "\n").encode("utf-8"))
-            deadline = time.time() + 5.0
-            while time.time() < deadline and self._running:
-                line = self._serial.readline().decode("utf-8", "ignore").strip()
-                if not line:
-                    continue
-                LOGGER.info("Ответ от устройства при рукопожатии: %s", line)
-                if line == self.HANDSHAKE_RESPONSE:
-                    LOGGER.info("Рукопожатие с RFID‑устройством успешно")
-                    return True
-                if line.startswith("ERR:"):
-                    LOGGER.warning("Ошибка от устройства при рукопожатии: %s", line)
-                    return False
-        except Exception:
-            LOGGER.exception("Ошибка при рукопожатии с устройством")
-            return False
-
-        LOGGER.warning("Таймаут рукопожатия с устройством")
-        return False
-
-    def _wait_for_card_hash(self) -> str | None:
-        """
-        Ожидает строку вида "CARD_HASH:<HEX>" от устройства.
-        После получения возвращает только HEX‑часть.
-        """
-        if self._serial is None:
-            return None
-
-        try:
-            deadline = time.time() + 60.0  # до минуты ожидания карты
-            while time.time() < deadline and self._running:
-                line = self._serial.readline().decode("utf-8", "ignore").strip()
-                if not line:
-                    continue
-                LOGGER.info("Строка от RFID‑устройства: %s", line)
-                if line.startswith(self.PREFIX_CARD_HASH):
-                    return line[len(self.PREFIX_CARD_HASH) :].strip()
-                if line.startswith("ERR:"):
-                    LOGGER.warning("Ошибка от устройства: %s", line)
-                    return None
-        except Exception:
-            LOGGER.exception("Ошибка при ожидании CARD_HASH от устройства")
-            return None
-
-        LOGGER.warning("Таймаут ожидания CARD_HASH от устройства")
-        return None
+                time.sleep(2.0)
 
 
 def main() -> int:

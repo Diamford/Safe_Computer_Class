@@ -1,0 +1,31 @@
+[Unit]
+Description=Safe Computer Class HTTP API (RFID/PIN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Where the project is installed on the server.
+WorkingDirectory=/opt/safe_computer_class
+
+# Optional config file:
+#   SCC_HOST=0.0.0.0
+#   SCC_PORT=80
+#   SAFE_CLASS_SMB_SERVER=...
+#   SAFE_CLASS_DRIVE=Z:
+#   ...and any other SAFE_CLASS_* variables
+EnvironmentFile=-/etc/default/scc
+
+ExecStart=/usr/bin/python3 -u /opt/safe_computer_class/scc.py serve ${SCC_HOST:-0.0.0.0} ${SCC_PORT:-80}
+
+Restart=always
+RestartSec=2
+
+# Hardening (keep it basic; Samba setup still uses sudo in scc.py for admin commands,
+# but "serve" itself is just HTTP + SQLite reads/writes).
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
