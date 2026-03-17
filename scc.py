@@ -1130,13 +1130,23 @@ directory mask = 0775
         )
         drive_letter = os.environ.get("SAFE_CLASS_DRIVE", "Z:").strip() or "Z:"
 
-        return True, {
+        payload = {
             "server": smb_server,
             "username": str(username),
-            # password намеренно не возвращаем (не храним в БД).
-            # daemon.pyw корректно уйдёт в fallback mount_school_drive_from_env.
             "drive_letter": drive_letter,
         }
+        # По умолчанию пароль не возвращаем (не храним в БД).
+        # Но для сценариев "клиент монтирует строго по ответу сервера" можно
+        # включить возврат пароля через переменные окружения сервиса.
+        #
+        # ВНИМАНИЕ: это выдаёт SMB-пароль по сети, используйте только в доверенной
+        # сети/туннеле и с минимальными правами.
+        return_password = os.environ.get("SAFE_CLASS_AUTH_RETURN_PASSWORD", "").strip()
+        if return_password in ("1", "true", "TRUE", "yes", "YES", "on", "ON"):
+            smb_password = os.environ.get("SAFE_CLASS_SMB_PASSWORD", "")
+            payload["password"] = smb_password
+
+        return True, payload
 
 
 class SCCRequestHandler(BaseHTTPRequestHandler):

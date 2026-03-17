@@ -56,6 +56,9 @@ SCC_PORT=80
 # Optional values returned to daemon.pyw via /api/scc/auth
 # SAFE_CLASS_SMB_SERVER=192.168.0.10
 # SAFE_CLASS_DRIVE=Z:
+# Return SMB password to clients (DISABLED by default; use carefully)
+# SAFE_CLASS_AUTH_RETURN_PASSWORD=1
+# SAFE_CLASS_SMB_PASSWORD=secret
 EOF
   chmod 644 "${ENV_FILE}"
 else
