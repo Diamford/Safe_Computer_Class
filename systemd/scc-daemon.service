@@ -1,0 +1,54 @@
+[Unit]
+Description=Safe Computer Class RFID PIN Daemon
+Documentation=https://github.com/yourusername/Safe_Computer_Class
+After=display-manager.service
+Wants=display-manager.service
+
+[Service]
+Type=simple
+
+# Run as the logged-in user (adjust username as needed)
+# Note: This service is typically user-specific, defined in ~/.config/systemd/user/
+# or can be run per-session through a desktop environment autostart entry
+User=%u
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=%h/.Xauthority"
+
+# Working directory
+WorkingDirectory=%h/.safe_computer_class
+
+# Optional configuration file
+EnvironmentFile=%h/.safe_computer_class/daemon.conf
+
+# Default environment variables - customize these
+Environment="SAFE_CLASS_SERVER=192.168.0.10"
+Environment="SAFE_CLASS_DRIVE=Z:"
+Environment="SAFE_CLASS_DAEMON_MODE=auth"
+Environment="SAFE_CLASS_RFID_PORT="
+Environment="SAFE_RFID_SKIP_PORTS="
+
+# Executable
+ExecStart=/usr/bin/python3 %h/.safe_computer_class/daemon.pyw
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Resource limits
+MemoryLimit=256M
+CPUQuota=50%
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.safe_computer_class
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=scc-daemon
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Safe Computer Class - HTTP API</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 800px;
+            width: 100%;
+            padding: 40px;
+        }
+        
+        h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        
+        .status {
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 4px;
+            margin-bottom: 30px;
+        }
+        
+        .status-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .status-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .status-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            background: #4CAF50;
+            color: white;
+            border-radius: 50%;
+            margin-right: 12px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        
+        .status-text {
+            flex: 1;
+        }
+        
+        .endpoints {
+            margin-top: 30px;
+        }
+        
+        .endpoints h2 {
+            color: #667eea;
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+        
+        .endpoint {
+            background: #f9f9f9;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-left: 4px solid #667eea;
+            border-radius: 0 4px 4px 0;
+        }
+        
+        .endpoint-method {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-weight: bold;
+            font-size: 0.9em;
+            margin-right: 10px;
+        }
+        
+        .endpoint-path {
+            font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+            color: #333;
+            font-weight: bold;
+        }
+        
+        .endpoint-desc {
+            margin-top: 8px;
+            color: #666;
+            font-size: 0.95em;
+        }
+        
+        .footer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+            text-align: center;
+            color: #999;
+            font-size: 0.9em;
+        }
+        
+        .button {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 4px;
+            text-decoration: none;
+            margin-top: 20px;
+            transition: background 0.3s ease;
+        }
+        
+        .button:hover {
+            background: #764ba2;
+        }
+        
+        @media (max-width: 600px) {
+            h1 {
+                font-size: 1.8em;
+            }
+            
+            .container {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔒 Safe Computer Class</h1>
+        <p class="subtitle">School Network Security & File Sharing System</p>
+        
+        <div class="status">
+            <div class="status-item">
+                <div class="status-icon">✓</div>
+                <div class="status-text">
+                    <strong>HTTP API Server</strong>
+                    <div style="font-size: 0.9em; color: #666;">API endpoints available</div>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="status-icon">✓</div>
+                <div class="status-text">
+                    <strong>Samba Integration</strong>
+                    <div style="font-size: 0.9em; color: #666;">File sharing system active</div>
+                </div>
+            </div>
+            <div class="status-item">
+                <div class="status-icon">✓</div>
+                <div class="status-text">
+                    <strong>RFID/PIN Authentication</strong>
+                    <div style="font-size: 0.9em; color: #666;">Security system ready</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="endpoints">
+            <h2>Available API Endpoints</h2>
+            
+            <div class="endpoint">
+                <div>
+                    <span class="endpoint-method">POST</span>
+                    <span class="endpoint-path">/api/scc/register_card</span>
+                </div>
+                <div class="endpoint-desc">Register an RFID card for a user</div>
+            </div>
+            
+            <div class="endpoint">
+                <div>
+                    <span class="endpoint-method">POST</span>
+                    <span class="endpoint-path">/api/scc/verify_card</span>
+                </div>
+                <div class="endpoint-desc">Verify if an RFID card is registered</div>
+            </div>
+            
+            <div class="endpoint">
+                <div>
+                    <span class="endpoint-method">POST</span>
+                    <span class="endpoint-path">/api/scc/verify_pin</span>
+                </div>
+                <div class="endpoint-desc">Verify the PIN associated with a card</div>
+            </div>
+            
+            <div class="endpoint">
+                <div>
+                    <span class="endpoint-method">POST</span>
+                    <span class="endpoint-path">/api/scc/auth</span>
+                </div>
+                <div class="endpoint-desc">Authenticate with card hash + PIN and get Samba access info</div>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>Safe Computer Class v0.5 | Documentation:</p>
+            <p>See project README.md for API documentation and deployment instructions</p>
+        </div>
+    </div>
+</body>
+</html>

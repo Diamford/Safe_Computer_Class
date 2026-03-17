@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  scc-http:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scc-http-server
+    ports:
+      - "80:80"
+      - "445:445"
+    environment:
+      # HTTP Server Configuration
+      SCC_HOST: "0.0.0.0"
+      SCC_PORT: "80"
+      
+      # Samba Server Configuration
+      SAFE_CLASS_SMB_SERVER: "${SAFE_CLASS_SMB_SERVER:-localhost}"
+      SAFE_CLASS_DRIVE: "${SAFE_CLASS_DRIVE:-Z:}"
+      
+      # Optional: Return password to clients (use with caution!)
+      # SAFE_CLASS_AUTH_RETURN_PASSWORD: "0"
+      
+      # Optional: Fallback password for Samba (not recommended)
+      # SAFE_CLASS_SMB_PASSWORD: "${SAFE_CLASS_SMB_PASSWORD:-}"
+      
+      PYTHONUNBUFFERED: "1"
+    
+    volumes:
+      # Persist Samba data
+      - samba_data:/srv/samba
+      - samba_mounts:/srv/samba_mounts
+      
+      # Persist database backups
+      - ./data/backups:/srv/samba/backups
+      
+      # Persist logs
+      - ./logs:/var/log/safe_computer_class
+      
+      # Mount Samba configuration
+      - ./config/smb.conf:/etc/samba/smb.conf:ro
+    
+    networks:
+      - scc-network
+    
+    restart: unless-stopped
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/api/scc/verify_card"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Reverse proxy with Nginx for better production setup
+  nginx:
+    image: nginx:latest
+    container_name: scc-nginx
+    ports:
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/ssl:/etc/nginx/ssl:ro
+    networks:
+      - scc-network
+    depends_on:
+      - scc-http
+    restart: unless-stopped
+    profiles:
+      - "with-nginx"
+
+volumes:
+  samba_data:
+    driver: local
+  samba_mounts:
+    driver: local
+
+networks:
+  scc-network:
+    driver: bridge

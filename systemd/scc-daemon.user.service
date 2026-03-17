@@ -1,0 +1,24 @@
+[Unit]
+Description=Safe Computer Class RFID PIN Daemon (User Session)
+Documentation=https://github.com/yourusername/Safe_Computer_Class
+PartOf=graphical-session.target
+After=graphical-session-pre.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/bin/scc-daemon
+
+# Restart on failure
+Restart=on-failure
+RestartSec=5
+
+# Display management
+Environment="DISPLAY=:0"
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=scc-daemon
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,15 @@
+# Safe Computer Class - Python Dependencies
+# 
+# Core dependencies
+PyQt6>=6.0.0,<7.0.0        # GUI framework for daemon and mount tool
+requests>=2.28.0           # HTTP client for API communication
+pyserial>=3.5              # Serial communication for ESP32-C3 RFID reader
+
+# Production server
+gunicorn>=21.0.0           # WSGI server for production deployment
+
+# Optional development dependencies
+# pytest>=7.0.0            # Testing framework
+# pytest-cov>=4.0.0        # Code coverage
+# black>=22.0.0            # Code formatting
+# flake8>=4.0.0            # Linting

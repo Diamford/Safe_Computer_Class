@@ -575,6 +575,7 @@ class DaemonController(QtCore.QObject):
                     "Также не задан SAFE_CLASS_SERVER (нужен для fallback URL).\n\n"
                     "Задайте SAFE_CLASS_AUTH_URL (предпочтительно) или SAFE_CLASS_SERVER.",
                 )
+                return
             ok, smb_data = auth_with_uuid_and_pin(self._current_card_hash, pin)
             if ok:
                 self._smb_server = smb_data.get("server") or None
