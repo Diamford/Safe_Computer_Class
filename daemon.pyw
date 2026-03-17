@@ -191,12 +191,17 @@ def auth_with_uuid_and_pin(card_hash: str, pin: str) -> tuple[bool, dict]:
       }
     """
     url = os.environ.get("SAFE_CLASS_AUTH_URL", "").strip()
-
     if not url:
-        LOGGER.error(
-            "SAFE_CLASS_AUTH_URL не задан — авторизация по UUID+PIN невозможна"
-        )
-        return False, {}
+        # Fallback как в mb_mount.py: если задан сервер — строим URL по умолчанию.
+        server = os.environ.get("SAFE_CLASS_SERVER", "").strip()
+        if server:
+            url = f"http://{server}/api/scc/auth"
+            LOGGER.info("SAFE_CLASS_AUTH_URL не задан, используем fallback: %s", url)
+        else:
+            LOGGER.error(
+                "SAFE_CLASS_AUTH_URL не задан (и SAFE_CLASS_SERVER не задан) — авторизация по UUID+PIN невозможна"
+            )
+            return False, {}
 
     if requests is None:
         LOGGER.error(
@@ -254,6 +259,10 @@ def _run_cmd(cmd: str) -> tuple[bool, str]:
             check=True,
             capture_output=True,
             text=True,
+            # На Windows stderr/stdout часто в OEM-кодировке (cp866),
+            # из-за чего русские сообщения превращаются в "кракозябры".
+            encoding="cp866" if os.name == "nt" else "utf-8",
+            errors="replace",
             shell=True,
         )
         return True, result.stdout
@@ -436,14 +445,26 @@ class DaemonController(QtCore.QObject):
                     )
                     if not ok:
                         LOGGER.error("Ошибка монтирования SMB‑шары: %s", msg.strip())
+                    self._run_on_success_hook()
                     return
 
                 # Fallback: старый режим через переменные окружения.
                 mount_school_drive_from_env()
+                self._run_on_success_hook()
             except Exception:
                 LOGGER.exception(
                     "Не удалось выполнить подключение SMB‑шары после успешной авторизации"
                 )
+
+    def _run_on_success_hook(self) -> None:
+        cmd = os.environ.get("SAFE_CLASS_ON_SUCCESS_CMD", "").strip()
+        if not cmd:
+            return
+        try:
+            LOGGER.info("Запуск SAFE_CLASS_ON_SUCCESS_CMD")
+            subprocess.Popen(cmd, shell=True)
+        except Exception:
+            LOGGER.exception("Не удалось выполнить SAFE_CLASS_ON_SUCCESS_CMD")
 
     @QtCore.pyqtSlot(str)
     def handle_card_hash(self, card_hash: str) -> None:
@@ -530,6 +551,17 @@ class DaemonController(QtCore.QObject):
                 return
 
             # Обычный режим авторизации: единый запрос UUID+PIN к серверу.
+            if (
+                not os.environ.get("SAFE_CLASS_AUTH_URL", "").strip()
+                and not os.environ.get("SAFE_CLASS_SERVER", "").strip()
+            ):
+                QtWidgets.QMessageBox.critical(
+                    None,
+                    "Config error",
+                    "Не задана переменная SAFE_CLASS_AUTH_URL.\n"
+                    "Также не задан SAFE_CLASS_SERVER (нужен для fallback URL).\n\n"
+                    "Задайте SAFE_CLASS_AUTH_URL (предпочтительно) или SAFE_CLASS_SERVER.",
+                )
             ok, smb_data = auth_with_uuid_and_pin(self._current_card_hash, pin)
             if ok:
                 self._smb_server = smb_data.get("server") or None
@@ -540,6 +572,12 @@ class DaemonController(QtCore.QObject):
                 self._on_auth_success()
             else:
                 LOGGER.warning("Авторизация по UUID+PIN отклонена сервером")
+                QtWidgets.QMessageBox.warning(
+                    None,
+                    "Auth failed",
+                    "Авторизация не прошла.\n\n"
+                    "Проверьте, что сервер доступен, и что карта зарегистрирована на сервере.",
+                )
         except Exception:
             LOGGER.exception("Ошибка при обработке введённого PIN")
 
@@ -596,6 +634,10 @@ def main() -> int:
     LOGGER.info("Запуск PIN‑демона")
 
     app = QtWidgets.QApplication(sys.argv)
+    # Важно: у нас нет главного окна, только диалог PIN.
+    # Если разрешить выход при закрытии последнего окна, Qt завершит app.exec()
+    # сразу после ввода PIN, и RFID-поток будет остановлен.
+    app.setQuitOnLastWindowClosed(False)
     controller = DaemonController(app)
 
     rfid_thread = RfidThread(controller)

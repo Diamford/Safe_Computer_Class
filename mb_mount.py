@@ -2,6 +2,7 @@
 # safe_class_qt_mounter_win.py
 
 import hashlib
+import logging
 import os
 import subprocess
 import sys
@@ -36,6 +37,27 @@ try:
 except ImportError:
     serial = None
     list_ports = None
+
+
+LOGGER = logging.getLogger("safe_computer_class.rfid")
+
+
+def _rfid_log(level: int, msg: str, *args) -> None:
+    """
+    Логирование для RFID-части.
+
+    В daemon.pyw есть файловый логгер, но mb_mount.py может запускаться и отдельно.
+    Поэтому, если логгеры не настроены, печатаем в stdout как fallback.
+    """
+    try:
+        if logging.getLogger().handlers or LOGGER.handlers:
+            LOGGER.log(level, msg, *args)
+        else:
+            text = msg % args if args else msg
+            print(f"[RFID] {text}")
+    except Exception:
+        # Никогда не валим основную логику из-за логирования
+        pass
 
 
 def run_cmd(cmd):
@@ -87,11 +109,12 @@ def _open_rfid_port(preferred_port: str | None = None) -> "serial.Serial | None"
         return None
 
     def _try_open_and_handshake(port_name: str) -> "serial.Serial | None":
-        # Отладочный вывод: какой порт пробуем открыть
-        print(f"[RFID] trying port {port_name}")
+        _rfid_log(logging.INFO, "trying port %s", port_name)
         ser: "serial.Serial | None" = None
         try:
-            ser = serial.Serial(port_name, 115200, timeout=1)
+            # На некоторых виртуальных/BT COM-портах open()/write() могут подвисать.
+            # timeout=1 ограничивает readline(), write_timeout ограничивает write().
+            ser = serial.Serial(port_name, 115200, timeout=1, write_timeout=1)
 
             # Для Arduino открытие порта может вызывать reset,
             # поэтому даём плате немного времени "выговориться".
@@ -100,7 +123,7 @@ def _open_rfid_port(preferred_port: str | None = None) -> "serial.Serial | None"
                 line = ser.readline().decode("utf-8", "ignore").strip()
                 if not line:
                     continue
-                print(f"[RFID] boot line on {port_name!r}: {line!r}")
+                _rfid_log(logging.DEBUG, "boot line on %r: %r", port_name, line)
 
             # Теперь пробуем нормальное рукопожатие (укороченный таймаут).
             ser.reset_input_buffer()
@@ -112,9 +135,9 @@ def _open_rfid_port(preferred_port: str | None = None) -> "serial.Serial | None"
                 line = ser.readline().decode("utf-8", "ignore").strip()
                 if not line:
                     continue
-                print(f"[RFID] handshake response on {port_name!r}: {line!r}")
+                _rfid_log(logging.DEBUG, "handshake response on %r: %r", port_name, line)
                 if line == "SCC_RFID_V1_OK":
-                    print(f"[RFID] handshake OK on {port_name}")
+                    _rfid_log(logging.INFO, "handshake OK on %s", port_name)
                     return ser
                 if "WAIT_HANDSHAKE" in line or "SCC RFID device booted" in line:
                     # Это явные строки от прошивки нашего устройства.
@@ -123,18 +146,20 @@ def _open_rfid_port(preferred_port: str | None = None) -> "serial.Serial | None"
                     # продолжаем дальше читать CARD_HASH уже вне рукопожатия.
                     saw_wait_state = True
                 if line.startswith("ERR:"):
-                    print(f"[RFID] handshake error on {port_name}: {line!r}")
+                    _rfid_log(logging.WARNING, "handshake error on %s: %r", port_name, line)
                     break
 
             if saw_wait_state:
-                print(
-                    f"[RFID] fallback: using port {port_name} "
-                    f"after WAIT_HANDSHAKE/boot messages without SCC_RFID_V1_OK"
+                _rfid_log(
+                    logging.INFO,
+                    "fallback: using port %s after WAIT_HANDSHAKE/boot messages without SCC_RFID_V1_OK",
+                    port_name,
                 )
                 return ser
 
             ser.close()
-        except Exception:
+        except Exception as exc:
+            _rfid_log(logging.WARNING, "port %s failed: %r", port_name, exc)
             try:
                 if ser is not None:
                     ser.close()
@@ -143,7 +168,7 @@ def _open_rfid_port(preferred_port: str | None = None) -> "serial.Serial | None"
         return None
 
     if preferred_port:
-        print(f"[RFID] preferred port is set to {preferred_port!r}")
+        _rfid_log(logging.INFO, "preferred port is set to %r", preferred_port)
         ser = _try_open_and_handshake(preferred_port)
         if ser is not None:
             return ser
@@ -151,14 +176,27 @@ def _open_rfid_port(preferred_port: str | None = None) -> "serial.Serial | None"
 
     env_port = os.environ.get("SAFE_RFID_PORT", "").strip()
     if env_port:
-        print(f"[RFID] SAFE_RFID_PORT is set to {env_port!r}")
+        _rfid_log(logging.INFO, "SAFE_RFID_PORT is set to %r", env_port)
         ser = _try_open_and_handshake(env_port)
         if ser is not None:
             return ser
         # если рукопожатие не удалось — тихо падаем на автопоиск
 
     # Список доступных портов с приоритетом более "подходящих".
-    ports = [p.device for p in list_ports.comports()]
+    skip_raw = os.environ.get("SAFE_RFID_SKIP_PORTS", "").strip()
+    skip_ports = {p.strip().upper() for p in skip_raw.split(",") if p.strip()}
+
+    ports_info = list(list_ports.comports())
+    ports = []
+    for p in ports_info:
+        dev = (p.device or "").strip()
+        if not dev:
+            continue
+        if dev.upper() in skip_ports:
+            _rfid_log(logging.INFO, "skipping port from SAFE_RFID_SKIP_PORTS: %s", dev)
+            continue
+        ports.append(dev)
+
     # Приоритетный список можем расширять по мере необходимости.
     priority = ["COM12", "COM11", "COM10"]
 
@@ -172,7 +210,7 @@ def _open_rfid_port(preferred_port: str | None = None) -> "serial.Serial | None"
         if ser is not None:
             return ser
 
-    print("[RFID] no suitable RFID port found")
+    _rfid_log(logging.WARNING, "no suitable RFID port found")
     return None
 
 
@@ -186,12 +224,12 @@ def read_card_hash_once(timeout_seconds: float = 60.0, preferred_port: str | Non
       ESP -> ПК:  "CARD_HASH:<HEX>\\n"
     """
     if serial is None:
-        print("[RFID] pyserial is not available")
+        _rfid_log(logging.ERROR, "pyserial is not available")
         return None
 
     ser = _open_rfid_port(preferred_port=preferred_port)
     if ser is None:
-        print("[RFID] failed to open RFID port")
+        _rfid_log(logging.ERROR, "failed to open RFID port")
         return None
 
     try:
@@ -205,9 +243,9 @@ def read_card_hash_once(timeout_seconds: float = 60.0, preferred_port: str | Non
                 line = ser.readline().decode("utf-8", "ignore").strip()
                 if not line:
                     continue
-                print(f"[RFID] second-stage handshake: {line!r}")
+                _rfid_log(logging.DEBUG, "second-stage handshake: %r", line)
                 if line == "SCC_RFID_V1_OK":
-                    print("[RFID] second-stage handshake OK")
+                    _rfid_log(logging.INFO, "second-stage handshake OK")
                     break
         except Exception:
             # Не рвём основное ожидание карты, даже если рукопожатие
@@ -221,12 +259,12 @@ def read_card_hash_once(timeout_seconds: float = 60.0, preferred_port: str | Non
             line = ser.readline().decode("utf-8", "ignore").strip()
             if not line:
                 continue
-            print(f"[RFID] line from device: {line!r}")
+            _rfid_log(logging.DEBUG, "line from device: %r", line)
             if line.startswith(prefix):
-                print("[RFID] CARD_HASH line received")
+                _rfid_log(logging.INFO, "CARD_HASH line received")
                 return line[len(prefix) :].strip()
             if line.startswith("ERR:"):
-                print("[RFID] error line from device, breaking")
+                _rfid_log(logging.WARNING, "error line from device, breaking: %r", line)
                 break
     finally:
         try:
