@@ -226,7 +226,6 @@ def auth_with_uuid_and_pin(card_hash: str, pin: str) -> tuple[bool, dict]:
 
         server = str(data.get("server", "")).strip()
         username = str(data.get("username", "")).strip()
-        password = str(data.get("password", ""))
         drive_letter = str(data.get("drive_letter", "")).strip() or "Z:"
 
         LOGGER.info(
@@ -236,12 +235,17 @@ def auth_with_uuid_and_pin(card_hash: str, pin: str) -> tuple[bool, dict]:
             drive_letter,
         )
 
-        return True, {
+        payload: dict = {
             "server": server,
             "username": username,
-            "password": password,
             "drive_letter": drive_letter,
         }
+        # Пароль сервер может не отдавать намеренно. Отличаем "не было поля"
+        # от "поле есть, но пароль пустой".
+        if "password" in data:
+            payload["password"] = str(data.get("password", ""))
+
+        return True, payload
     except Exception:
         LOGGER.exception("Ошибка HTTP‑запроса при авторизации по UUID+PIN")
         return False, {}
@@ -404,6 +408,7 @@ class DaemonController(QtCore.QObject):
         # SMB‑параметры, полученные от сервера при успешной авторизации
         self._smb_server: str | None = None
         self._smb_username: str | None = None
+        # None означает "сервер пароль не выдавал". Пустая строка — "пароль пустой".
         self._smb_password: str | None = None
         self._smb_drive: str | None = None
 
@@ -428,11 +433,14 @@ class DaemonController(QtCore.QObject):
 
         if os.name == "nt":
             try:
-                # Если сервер вернул SMB‑параметры, используем их.
-                if self._smb_server and self._smb_username is not None:
+                # Если сервер вернул SMB‑параметры и пароль — используем их.
+                # Если пароль НЕ выдавался (self._smb_password is None), то
+                # монтирование делаем только через переменные окружения (fallback),
+                # иначе net use почти всегда даст System error 86.
+                if self._smb_server and self._smb_username is not None and self._smb_password is not None:
                     server = self._smb_server
                     username = self._smb_username
-                    password = self._smb_password or ""
+                    password = self._smb_password
                     drive_letter = self._smb_drive or "Z:"
                     LOGGER.info(
                         "Монтируем SMB по данным с сервера: %s -> \\\\%s\\school\\%s",
@@ -445,10 +453,15 @@ class DaemonController(QtCore.QObject):
                     )
                     if not ok:
                         LOGGER.error("Ошибка монтирования SMB‑шары: %s", msg.strip())
-                    self._run_on_success_hook()
+                    else:
+                        self._run_on_success_hook()
                     return
 
                 # Fallback: старый режим через переменные окружения.
+                if self._smb_password is None:
+                    LOGGER.info(
+                        "Сервер не выдал SMB-пароль — используем монтирование по переменным окружения"
+                    )
                 mount_school_drive_from_env()
                 self._run_on_success_hook()
             except Exception:
@@ -566,7 +579,11 @@ class DaemonController(QtCore.QObject):
             if ok:
                 self._smb_server = smb_data.get("server") or None
                 self._smb_username = smb_data.get("username") or None
-                self._smb_password = smb_data.get("password") or ""
+                # пароль может отсутствовать совсем
+                if "password" in smb_data:
+                    self._smb_password = smb_data.get("password") or ""
+                else:
+                    self._smb_password = None
                 self._smb_drive = smb_data.get("drive_letter") or None
                 LOGGER.info("Авторизация по UUID+PIN успешна, монтируем диск")
                 self._on_auth_success()

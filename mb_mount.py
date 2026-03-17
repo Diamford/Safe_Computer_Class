@@ -67,6 +67,8 @@ def run_cmd(cmd):
             check=True,
             capture_output=True,
             text=True,
+            encoding="cp866" if os.name == "nt" else "utf-8",
+            errors="replace",
             shell=True,
         )
         return True, result.stdout
