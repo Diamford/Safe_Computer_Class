@@ -60,16 +60,26 @@ def _rfid_log(level: int, msg: str, *args) -> None:
         pass
 
 
-def run_cmd(cmd):
+def run_cmd(cmd, input_data=None):
+    """
+    Безопасное выполнение команды без shell=True.
+    
+    Параметры:
+      - cmd: список аргументов [программа, аргумент1, аргумент2, ...]
+      - input_data: данные для stdin (если нужно)
+    
+    Возвращает: (успех, stdout/stderr)
+    """
     try:
         result = subprocess.run(
             cmd,
+            input=input_data,
             check=True,
             capture_output=True,
             text=True,
             encoding="cp866" if os.name == "nt" else "utf-8",
             errors="replace",
-            shell=True,
+            shell=False,  # БЕЗОПАСНО: без интерпретатора shell
         )
         return True, result.stdout
     except subprocess.CalledProcessError as e:
@@ -77,18 +87,36 @@ def run_cmd(cmd):
 
 
 def mount_school_drive(server, username, password, drive_letter="Z:"):
-    # Монтируем сразу личную папку пользователя внутри шары,
-    # чтобы он не видел каталоги других пользователей.
+    """
+    Монтирование SMB-шары без использования shell=True.
+    
+    Параметры передаются как список аргументов, что предотвращает
+    injection-атаки через специальные символы в имени пользователя/пароле.
+    """
+    if os.name != "nt":
+        _rfid_log(logging.ERROR, "mount_school_drive работает только на Windows")
+        return False, "mount_school_drive is Windows-only"
+    
+    # Монтируем сразу личную папку пользователя внутри шары
     unc = f"\\\\{server}\\school\\{username}"
+    
     # /persistent:no чтобы не сохранять подключение навсегда
-    cmd = (
-        f'net use {drive_letter} "{unc}" "{password}" /user:"{username}" /persistent:no'
-    )
+    # Все параметры передаём как список — БЕЗ shell интерпретатора
+    cmd = ["net", "use", drive_letter, unc, password, f"/user:{username}", "/persistent:no"]
+    
     return run_cmd(cmd)
 
 
 def umount_school_drive(drive_letter="Z:"):
-    cmd = f"net use {drive_letter} /delete /y"
+    """
+    Отключение сетевого диска без использования shell=True.
+    """
+    if os.name != "nt":
+        _rfid_log(logging.ERROR, "umount_school_drive работает только на Windows")
+        return False, "umount_school_drive is Windows-only"
+    
+    # Безопасный вызов: все параметры как список
+    cmd = ["net", "use", drive_letter, "/delete", "/y"]
     return run_cmd(cmd)
 
 

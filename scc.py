@@ -10,6 +10,7 @@ import os
 import subprocess
 import pwd
 import sqlite3
+import re
 from pathlib import Path
 import argparse
 from datetime import datetime
@@ -25,7 +26,39 @@ DB_PATH = f"{SAMBA_BASE}/school.db"
 MOUNTS_BASE = "/srv/samba_mounts"
 
 
+def validate_username(username: str) -> tuple[bool, str]:
+    """
+    Валидирует имя пользователя для использования как Unix-пользователя.
+    
+    Правила:
+    - 1-32 символа
+    - только буквы, цифры, точки, подчёркивания, дефисы (no spaces, no special chars)
+    - раскомпилировано на основе POSIX username rules (без верхнего case, для простоты)
+    """
+    if not username:
+        return False, "username cannot be empty"
+    if len(username) > 32:
+        return False, "username too long (max 32 characters)"
+    # Разрешаем буквы (a-z, A-Z), цифры (0-9), точка, подчёркивание, дефис
+    # И первый символ не должен быть цифрой (Unix-почти стандарт)
+    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9._-]*$", username):
+        return False, "username contains invalid characters (allowed: letters, digits, ._-)"
+    return True, ""
 
+
+def validate_class_name(class_name: str) -> tuple[bool, str]:
+    """
+    Валидирует имя класса.
+    
+    Правила: 1-64 символа, буквы, цифры, подчёркивание, дефис.
+    """
+    if not class_name:
+        return False, "class_name cannot be empty"
+    if len(class_name) > 64:
+        return False, "class_name too long (max 64 characters)"
+    if not re.match(r"^[a-zA-Z0-9_-]+$", class_name):
+        return False, "class_name contains invalid characters (allowed: letters, digits, _-)"
+    return True, ""
 
 
 class SchoolSamba:
@@ -295,7 +328,17 @@ directory mask = 0775
 
 
 
-    def add_class(self, class_name: str):
+    def add_class(self, class_name: str) -> bool:
+        """
+        Добавляет класс с валидацией имени.
+        
+        Возвращает: True при успехе, False при ошибке.
+        """
+        # Валидируем имя класса
+        valid, msg = validate_class_name(class_name)
+        if not valid:
+            print(f"invalid class_name: {msg}")
+            return False
 
         conn = sqlite3.connect(DB_PATH)
 
@@ -441,17 +484,43 @@ directory mask = 0775
 
 
 
-    def add_user(self, username: str, role: str, class_name: str | None, uid: int, password: str):
+    def add_user(self, username: str, role: str, class_name: str | None, uid: int, password: str) -> bool:
+        """
+        Добавляет пользователя с валидацией входных данных.
+        
+        Возвращает: True при успехе, False при ошибке.
+        """
+        # Валидируем имя пользователя
+        valid, msg = validate_username(username)
+        if not valid:
+            print(f"invalid username: {msg}")
+            return False
+        
+        # Валидируем класс (если задан)
+        if class_name:
+            valid, msg = validate_class_name(class_name)
+            if not valid:
+                print(f"invalid class_name: {msg}")
+                return False
+        
+        # Валидируем UID (должен быть число >= 1000 обычно для обычных пользователей)
+        try:
+            uid_int = int(uid)
+            if uid_int < 1000 or uid_int > 65534:
+                print(f"invalid uid: must be between 1000 and 65534")
+                return False
+        except (ValueError, TypeError):
+            print(f"invalid uid: must be an integer")
+            return False
 
         # Unix-пользователь
-
         try:
 
             pw = pwd.getpwnam(username)
 
             print(f"user {username} already exists, using system account")
 
-            uid = pw.pw_uid
+            uid_int = pw.pw_uid
 
             home = Path(pw.pw_dir)
 
@@ -475,7 +544,7 @@ directory mask = 0775
 
                     "-u",
 
-                    str(uid),
+                    str(uid_int),
 
                     "-G",
 
@@ -494,10 +563,9 @@ directory mask = 0775
             if not ok:
 
                 print(f"failed to create system user {username}: {out}")
-
                 return False
 
-            print(f"system user {username} created with uid {uid}")
+            print(f"system user {username} created with uid {uid_int}")
 
 
 
@@ -517,7 +585,7 @@ directory mask = 0775
 
             "INSERT OR REPLACE INTO users (username, role, class_name, uid) VALUES (?, ?, ?, ?)",
 
-            (username, role, class_name, uid),
+            (username, role, class_name, uid_int),
 
         )
 
@@ -539,7 +607,7 @@ directory mask = 0775
 
         self.create_user_mounts(username, role)
 
-        print(f"user {username} ({role}, uid {uid}) fully configured")
+        print(f"user {username} ({role}, uid {uid_int}) fully configured")
 
         return True
 
@@ -562,28 +630,51 @@ directory mask = 0775
 
 
     def add_samba_user(self, username: str, password: str):
-
-        cmd = [
-
-            "bash",
-
-            "-c",
-
-            f'printf "%s\\n%s\\n" "{password}" "{password}" | smbpasswd -a -s "{username}"'
-
-        ]
-
-        ok, out = self.run_cmd(cmd, check=False)
-
-        if not ok:
-
-            print(f"smbpasswd failed for {username}: {out}")
-
-            return
-
-        self.run_cmd(["smbpasswd", "-e", username], check=False)
-
-        print(f"samba password set for {username}")
+        """
+        Добавляет Samba-пользователя и задаёт пароль безопасно.
+        
+        Вместо bash -c с паролем в аргументах, используем stdin для передачи pароля.
+        Это предотвращает видимость пароля в ps/ptrace/логах процессов.
+        """
+        # Сначала создаём пользователя через useradd (если не существует)
+        # но мы уже создали через add_user -> useradd в основном коде.
+        # Здесь только настраиваем Samba-пароль.
+        
+        # smbpasswd -a -s ждёт два пароля в stdin (пароль и подтверждение)
+        password_input = f"{password}\n{password}\n"
+        
+        # Безопасное выполнение: пароль передаём через stdin, а не в аргументах
+        try:
+            result = subprocess.run(
+                ["smbpasswd", "-a", "-s", username],
+                input=password_input,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            
+            if result.returncode != 0:
+                print(f"smbpasswd failed for {username}: {result.stderr}")
+                return False
+            
+            # После успешного добавления пароля, активируем пользователя
+            result = subprocess.run(
+                ["sudo", "smbpasswd", "-e", username],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            
+            if result.returncode == 0:
+                print(f"samba password set for {username}")
+                return True
+            else:
+                print(f"smbpasswd -e failed for {username}: {result.stderr}")
+                return False
+                
+        except Exception as e:
+            print(f"error setting samba password for {username}: {e}")
+            return False
 
 
 
@@ -853,7 +944,17 @@ directory mask = 0775
 
 
 
-    def del_class(self, class_name: str):
+    def del_class(self, class_name: str) -> bool:
+        """
+        Удаляет класс только если в нём нет пользователей.
+        
+        Возвращает: True при успехе, False при ошибке.
+        """
+        # Валидируем имя класса
+        valid, msg = validate_class_name(class_name)
+        if not valid:
+            print(f"invalid class_name: {msg}")
+            return False
 
         conn = sqlite3.connect(DB_PATH)
 
@@ -1343,7 +1444,9 @@ def main():
 
         name, uid, pw = args.args
 
-        school.add_user(name, "teacher", None, int(uid), pw)
+        if not school.add_user(name, "teacher", None, uid, pw):
+            print("failed to add teacher")
+            sys.exit(1)
 
 
 
@@ -1371,19 +1474,25 @@ def main():
 
         name, cls, uid, pw = args.args
 
-        school.add_user(name, "student", cls, int(uid), pw)
+        if not school.add_user(name, "student", cls, uid, pw):
+            print("failed to add student")
+            sys.exit(1)
 
 
 
     elif args.command == "addclass" and len(args.args) == 1:
 
-        school.add_class(args.args[0])
+        if not school.add_class(args.args[0]):
+            print("failed to add class")
+            sys.exit(1)
 
 
 
     elif args.command == "delclass" and len(args.args) == 1:
 
-        school.del_class(args.args[0])
+        if not school.del_class(args.args[0]):
+            print("failed to delete class")
+            sys.exit(1)
 
 
 

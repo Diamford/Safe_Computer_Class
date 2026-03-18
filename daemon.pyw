@@ -251,15 +251,16 @@ def auth_with_uuid_and_pin(card_hash: str, pin: str) -> tuple[bool, dict]:
         return False, {}
 
 
-def _run_cmd(cmd: str) -> tuple[bool, str]:
+def _run_cmd(cmd_list: list) -> tuple[bool, str]:
     """
-    Запуск shell‑команды и возврат (ok, stdout/stderr).
-
-    Используется для подключения SMB‑шары так же, как в mb_mount.py.
+    Безопасный запуск команды БЕЗ shell=True.
+    
+    Параметр cmd_list — это список аргументов [программа, аргумент1, аргумент2, ...].
+    Возвращает (ok, stdout/stderr).
     """
     try:
         result = subprocess.run(
-            cmd,
+            cmd_list,
             check=True,
             capture_output=True,
             text=True,
@@ -267,7 +268,7 @@ def _run_cmd(cmd: str) -> tuple[bool, str]:
             # из-за чего русские сообщения превращаются в "кракозябры".
             encoding="cp866" if os.name == "nt" else "utf-8",
             errors="replace",
-            shell=True,
+            shell=False,  # БЕЗОПАСНО: без интерпретатора shell
         )
         return True, result.stdout
     except subprocess.CalledProcessError as exc:
@@ -286,6 +287,11 @@ def mount_school_drive_from_env() -> None:
 
     При ошибке только логируем, работу демона не останавливаем.
     """
+    if os.name != "nt":
+        # На Linux SMB обычно монтируется через mount.cifs, а не net use
+        LOGGER.info("SMB mounting not applicable on non-Windows platforms")
+        return
+    
     server = os.environ.get("SAFE_CLASS_SERVER", "").strip()
     username = os.environ.get("SAFE_CLASS_USER", "").strip()
     password = os.environ.get("SAFE_CLASS_PASS", "")
@@ -299,10 +305,9 @@ def mount_school_drive_from_env() -> None:
         return
     # Как в mb_mount.py: монтируем сразу личную папку пользователя.
     unc = f"\\\\{server}\\school\\{username}"
-    cmd = (
-        f'net use {drive_letter} "{unc}" "{password}" '
-        f'/user:"{username}" /persistent:no'
-    )
+    
+    # Безопасное выполнение: все параметры передаём как список БЕЗ shell интерпретатора
+    cmd = ["net", "use", drive_letter, unc, password, f"/user:{username}", "/persistent:no"]
 
     LOGGER.info(
         "Подключение SMB‑шары %s к диску %s для пользователя %s",
@@ -334,8 +339,9 @@ def umount_school_drive_from_env() -> None:
         )
         return
 
-    cmd = f"net use {drive_letter} /delete /y"
-    LOGGER.info("Отключение SMB‑диска %s командой: %s", drive_letter, cmd)
+    # Безопасное выполнение: все параметры как список БЕЗ shell интерпретатора
+    cmd = ["net", "use", drive_letter, "/delete", "/y"]
+    LOGGER.info("Отключение SMB‑диска %s", drive_letter)
     ok, msg = _run_cmd(cmd)
     if ok:
         LOGGER.info("SMB‑диск %s успешно отключён: %s", drive_letter, msg.strip())
