@@ -5,10 +5,50 @@ import sys
 import threading
 import time
 import hashlib
+import json
 from pathlib import Path
 
 from PyQt6 import QtCore, QtWidgets
 
+
+def _load_client_config() -> dict:
+    """Load local client configuration from client_config.json (optional)."""
+    config_path = Path(__file__).resolve().parent / "client_config.json"
+    if not config_path.exists():
+        return {}
+    try:
+        with config_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+_CLIENT_CONFIG = _load_client_config()
+
+
+def _client_setting(key: str, default=None):
+    """Get setting from env, then local config, then default."""
+    value = os.environ.get(key)
+    if value and str(value).strip():
+        return str(value).strip()
+    value = _CLIENT_CONFIG.get(key)
+    if value and str(value).strip():
+        return str(value).strip()
+    return default
+
+
+def _default_server_url() -> str:
+    """Build default URL for server endpoints.
+
+    - local config key SAFE_CLASS_SERVER
+    - env var SAFE_CLASS_SERVER
+    - default localhost:5000
+    """
+    server = _client_setting("SAFE_CLASS_SERVER", "127.0.0.1:5000")
+    return f"http://{server}"
 try:
     import requests  # HTTP‑клиент для общения с сервером
 except ImportError:
@@ -95,13 +135,10 @@ def verify_card_hash(card_hash: str) -> tuple[bool, bool]:
     Формат ответа предполагается JSON:
       { "exists": true/false, "require_pin": true/false }
     """
-    url = os.environ.get("SAFE_CLASS_CARD_URL", "").strip()
-
+    url = _client_setting("SAFE_CLASS_CARD_URL")
     if not url:
-        LOGGER.error(
-            "SAFE_CLASS_CARD_URL не задан — проверка карты на сервере невозможна"
-        )
-        return False, False
+        url = f"{_default_server_url()}/api/scc/verify_card"
+        LOGGER.info("SAFE_CLASS_CARD_URL не задан, пробуем %s", url)
 
     if requests is None:
         LOGGER.error(
@@ -140,13 +177,10 @@ def verify_pin_on_server(card_hash: str, pin: str) -> bool:
     Формат ответа предполагается JSON:
       { "ok": true/false }
     """
-    url = os.environ.get("SAFE_CLASS_PIN_URL", "").strip()
-
+    url = _client_setting("SAFE_CLASS_PIN_URL")
     if not url:
-        LOGGER.error(
-            "SAFE_CLASS_PIN_URL не задан — проверка PIN на сервере невозможна"
-        )
-        return False
+        url = f"{_default_server_url()}/api/scc/verify_pin"
+        LOGGER.info("SAFE_CLASS_PIN_URL не задан, пробуем %s", url)
 
     if requests is None:
         LOGGER.error(
@@ -190,18 +224,10 @@ def auth_with_uuid_and_pin(card_hash: str, pin: str) -> tuple[bool, dict]:
         "drive_letter": "Z:"   # необязательное поле
       }
     """
-    url = os.environ.get("SAFE_CLASS_AUTH_URL", "").strip()
+    url = _client_setting("SAFE_CLASS_AUTH_URL")
     if not url:
-        # Fallback как в mb_mount.py: если задан сервер — строим URL по умолчанию.
-        server = os.environ.get("SAFE_CLASS_SERVER", "").strip()
-        if server:
-            url = f"http://{server}/api/scc/auth"
-            LOGGER.info("SAFE_CLASS_AUTH_URL не задан, используем fallback: %s", url)
-        else:
-            LOGGER.error(
-                "SAFE_CLASS_AUTH_URL не задан (и SAFE_CLASS_SERVER не задан) — авторизация по UUID+PIN невозможна"
-            )
-            return False, {}
+        url = f"{_default_server_url()}/api/scc/auth"
+        LOGGER.info("SAFE_CLASS_AUTH_URL не задан, используем %s", url)
 
     if requests is None:
         LOGGER.error(
@@ -214,12 +240,12 @@ def auth_with_uuid_and_pin(card_hash: str, pin: str) -> tuple[bool, dict]:
     try:
         resp = requests.post(
             url,
-            json={"uuid": card_hash, "pin_hash": pin_hash},
+            json={"uuid": card_hash, "card_hash": card_hash, "pin_hash": pin_hash, "pin": pin},
             timeout=5,
         )
         resp.raise_for_status()
         data = resp.json()
-        ok = bool(data.get("ok"))
+        ok = bool(data.get("success", data.get("ok", False)))
         if not ok:
             LOGGER.warning("Сервер отклонил авторизацию по UUID+PIN")
             return False, {}
@@ -239,11 +265,14 @@ def auth_with_uuid_and_pin(card_hash: str, pin: str) -> tuple[bool, dict]:
             "server": server,
             "username": username,
             "drive_letter": drive_letter,
+            "password": None,
         }
-        # Пароль сервер может не отдавать намеренно. Отличаем "не было поля"
-        # от "поле есть, но пароль пустой".
+
         if "password" in data:
-            payload["password"] = str(data.get("password", ""))
+            payload["password"] = data.get("password")
+        elif "password" in data.get("data", {}):
+            # backward compatibility
+            payload["password"] = data["data"].get("password")
 
         return True, payload
     except Exception:

@@ -7,8 +7,40 @@ import os
 import subprocess
 import sys
 import time
+import json
 from pathlib import Path
 
+
+def _load_client_config() -> dict:
+    config_path = Path(__file__).resolve().parent / "client_config.json"
+    if not config_path.exists():
+        return {}
+    try:
+        with config_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+_CLIENT_CONFIG = _load_client_config()
+
+
+def _client_setting(key: str, default=None):
+    value = os.environ.get(key)
+    if value and str(value).strip():
+        return str(value).strip()
+    value = _CLIENT_CONFIG.get(key)
+    if value and str(value).strip():
+        return str(value).strip()
+    return default
+
+
+def _default_server_url() -> str:
+    server = _client_setting("SAFE_CLASS_SERVER", "127.0.0.1:5000")
+    return f"http://{server}"
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
@@ -293,25 +325,26 @@ def register_card_on_server(server: str, username: str, card_hash: str, pin: str
     if requests is None:
         return False, "Python‑библиотека 'requests' не установлена"
 
-    url = os.environ.get("SAFE_CLASS_REGISTER_URL", "").strip()
+    url = _client_setting("SAFE_CLASS_REGISTER_URL")
     if not url:
-        url = f"http://{server}/api/scc/register_card"
+        url = f"{_default_server_url()}/api/scc/register_card"
 
-    pin_hash = _sha256_hex(pin)
-
+    # В новой архитектуре PIN хранится на сервере в хешированном виде,
+    # поэтому клиент передает plain PIN (или optional pin_hash для обратной совместимости).
     try:
         resp = requests.post(
             url,
             json={
                 "username": username,
                 "card_hash": card_hash,
-                "pin_hash": pin_hash,
+                "pin": pin,
+                "pin_hash": _sha256_hex(pin),
             },
             timeout=5,
         )
         resp.raise_for_status()
         data = resp.json()
-        ok = bool(data.get("ok", True))
+        ok = bool(data.get("success", data.get("ok", False)))
         msg = str(data.get("message", "registered"))
         return ok, msg
     except Exception as exc:

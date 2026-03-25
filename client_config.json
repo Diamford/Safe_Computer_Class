@@ -1,0 +1,8 @@
+{
+  "SAFE_CLASS_SERVER": "127.0.0.1:5000",
+  "SAFE_CLASS_AUTH_URL": "http://127.0.0.1:5000/api/scc/auth",
+  "SAFE_CLASS_REGISTER_URL": "http://127.0.0.1:5000/api/scc/register_card",
+  "SAFE_CLASS_CARD_URL": "http://127.0.0.1:5000/api/scc/verify_card",
+  "SAFE_CLASS_PIN_URL": "http://127.0.0.1:5000/api/scc/verify_pin",
+  "SAFE_CLASS_DRIVE": "Z:"
+}

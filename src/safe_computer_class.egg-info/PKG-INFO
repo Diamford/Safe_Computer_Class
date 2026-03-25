@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: safe-computer-class
+Version: 0.6.0
+Summary: Safe Computer Class - School network access control system
+Author: SCC Team
+Requires-Python: >=3.8
+Requires-Dist: flask>=2.0.0
+Requires-Dist: pyserial>=3.5
+Requires-Dist: pyqt6>=6.0.0
+Requires-Dist: cryptography>=3.4.0
+Requires-Dist: pydantic>=1.8.0

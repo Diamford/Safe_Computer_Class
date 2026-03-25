@@ -1,0 +1,5 @@
+flask>=2.0.0
+pyserial>=3.5
+pyqt6>=6.0.0
+cryptography>=3.4.0
+pydantic>=1.8.0

@@ -1,0 +1,1 @@
+# Safe Computer Class - Refactored Architecture
