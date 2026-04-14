@@ -7,8 +7,40 @@ import os
 import subprocess
 import sys
 import time
+import json
 from pathlib import Path
 
+
+def _load_client_config() -> dict:
+    config_path = Path(__file__).resolve().parent / "client_config.json"
+    if not config_path.exists():
+        return {}
+    try:
+        with config_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+_CLIENT_CONFIG = _load_client_config()
+
+
+def _client_setting(key: str, default=None):
+    value = os.environ.get(key)
+    if value and str(value).strip():
+        return str(value).strip()
+    value = _CLIENT_CONFIG.get(key)
+    if value and str(value).strip():
+        return str(value).strip()
+    return default
+
+
+def _default_server_url() -> str:
+    server = _client_setting("SAFE_CLASS_SERVER", "127.0.0.1:8080")
+    return f"http://{server}"
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
@@ -62,15 +94,29 @@ def _rfid_log(level: int, msg: str, *args) -> None:
 
 def run_cmd(cmd):
     try:
-        result = subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="cp866" if os.name == "nt" else "utf-8",
-            errors="replace",
-            shell=True,
-        )
+        if isinstance(cmd, str):
+            # For legacy string commands, use shell=True but warn
+            import warnings
+            warnings.warn("Using string command with shell=True is insecure", DeprecationWarning)
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="cp866" if os.name == "nt" else "utf-8",
+                errors="replace",
+                shell=True,
+            )
+        else:
+            # List of arguments - safe
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="cp866" if os.name == "nt" else "utf-8",
+                errors="replace",
+            )
         return True, result.stdout
     except subprocess.CalledProcessError as e:
         return False, e.stderr
@@ -79,16 +125,20 @@ def run_cmd(cmd):
 def mount_school_drive(server, username, password, drive_letter="Z:"):
     # Монтируем сразу личную папку пользователя внутри шары,
     # чтобы он не видел каталоги других пользователей.
+    smb_port = _client_setting("SAFE_CLASS_SMB_PORT", "4445")
+    if smb_port and smb_port != "4445":
+        server = f"{server}:{smb_port}"
     unc = f"\\\\{server}\\school\\{username}"
     # /persistent:no чтобы не сохранять подключение навсегда
-    cmd = (
-        f'net use {drive_letter} "{unc}" "{password}" /user:"{username}" /persistent:no'
-    )
+    cmd = [
+        'net', 'use', drive_letter, unc, password,
+        '/user:' + username, '/persistent:no'
+    ]
     return run_cmd(cmd)
 
 
 def umount_school_drive(drive_letter="Z:"):
-    cmd = f"net use {drive_letter} /delete /y"
+    cmd = ['net', 'use', drive_letter, '/delete', '/y']
     return run_cmd(cmd)
 
 
@@ -293,25 +343,26 @@ def register_card_on_server(server: str, username: str, card_hash: str, pin: str
     if requests is None:
         return False, "Python‑библиотека 'requests' не установлена"
 
-    url = os.environ.get("SAFE_CLASS_REGISTER_URL", "").strip()
+    url = _client_setting("SAFE_CLASS_REGISTER_URL")
     if not url:
-        url = f"http://{server}/api/scc/register_card"
+        url = f"{_default_server_url()}/api/scc/register_card"
 
-    pin_hash = _sha256_hex(pin)
-
+    # В новой архитектуре PIN хранится на сервере в хешированном виде,
+    # поэтому клиент передает plain PIN (или optional pin_hash для обратной совместимости).
     try:
         resp = requests.post(
             url,
             json={
                 "username": username,
                 "card_hash": card_hash,
-                "pin_hash": pin_hash,
+                "pin": pin,
+                "pin_hash": _sha256_hex(pin),
             },
             timeout=5,
         )
         resp.raise_for_status()
         data = resp.json()
-        ok = bool(data.get("ok", True))
+        ok = bool(data.get("success", data.get("ok", False)))
         msg = str(data.get("message", "registered"))
         return ok, msg
     except Exception as exc:
@@ -373,7 +424,7 @@ class SafeClassMounterWin(QMainWindow):
         # server
         h1 = QHBoxLayout()
         h1.addWidget(QLabel("server:"))
-        self.server_edit = QLineEdit("192.168.0.10")
+        self.server_edit = QLineEdit("127.0.0.1:8080")
         h1.addWidget(self.server_edit)
         layout.addLayout(h1)
 

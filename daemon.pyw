@@ -1,5 +1,6 @@
 import logging
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -251,7 +252,7 @@ def auth_with_uuid_and_pin(card_hash: str, pin: str) -> tuple[bool, dict]:
         return False, {}
 
 
-def _run_cmd(cmd: str) -> tuple[bool, str]:
+def _run_cmd(cmd: list[str]) -> tuple[bool, str]:
     """
     Запуск shell‑команды и возврат (ok, stdout/stderr).
 
@@ -267,7 +268,7 @@ def _run_cmd(cmd: str) -> tuple[bool, str]:
             # из-за чего русские сообщения превращаются в "кракозябры".
             encoding="cp866" if os.name == "nt" else "utf-8",
             errors="replace",
-            shell=True,
+            shell=False,
         )
         return True, result.stdout
     except subprocess.CalledProcessError as exc:
@@ -299,10 +300,15 @@ def mount_school_drive_from_env() -> None:
         return
     # Как в mb_mount.py: монтируем сразу личную папку пользователя.
     unc = f"\\\\{server}\\school\\{username}"
-    cmd = (
-        f'net use {drive_letter} "{unc}" "{password}" '
-        f'/user:"{username}" /persistent:no'
-    )
+    cmd = [
+        "net",
+        "use",
+        drive_letter,
+        unc,
+        password,
+        f"/user:{username}",
+        "/persistent:no",
+    ]
 
     LOGGER.info(
         "Подключение SMB‑шары %s к диску %s для пользователя %s",
@@ -334,8 +340,8 @@ def umount_school_drive_from_env() -> None:
         )
         return
 
-    cmd = f"net use {drive_letter} /delete /y"
-    LOGGER.info("Отключение SMB‑диска %s командой: %s", drive_letter, cmd)
+    cmd = ["net", "use", drive_letter, "/delete", "/y"]
+    LOGGER.info("Отключение SMB‑диска %s командой net use", drive_letter)
     ok, msg = _run_cmd(cmd)
     if ok:
         LOGGER.info("SMB‑диск %s успешно отключён: %s", drive_letter, msg.strip())
@@ -475,7 +481,11 @@ class DaemonController(QtCore.QObject):
             return
         try:
             LOGGER.info("Запуск SAFE_CLASS_ON_SUCCESS_CMD")
-            subprocess.Popen(cmd, shell=True)
+            parsed = shlex.split(cmd, posix=(os.name != "nt"))
+            if not parsed:
+                LOGGER.warning("SAFE_CLASS_ON_SUCCESS_CMD пуст после парсинга")
+                return
+            subprocess.Popen(parsed, shell=False)
         except Exception:
             LOGGER.exception("Не удалось выполнить SAFE_CLASS_ON_SUCCESS_CMD")
 

@@ -1,0 +1,341 @@
+# Документация по проекту Safe Computer Class (SCC)
+
+## Обзор системы
+
+### TL;DR
+Safe Computer Class (SCC) v0.5 - это система управления доступом к сетевым дискам в школьном компьютерном классе. Она обеспечивает ролевый контроль доступа для учеников и учителей, используя RFID-карты и PIN-коды для аутентификации. Система состоит из сервера на Linux с Samba и клиентов на Windows с GUI и демоном.
+
+### Цель проекта
+Проект решает проблему хаотичного хранения файлов в школьных классах путем создания централизованной системы с ролевым доступом к общим сетевым папкам. Ученики получают доступ к материалам класса и личным папкам, учителя - к папкам классов и учеников для проверки работ.
+
+### Архитектура на высоком уровне
+
+#### 1. Ключевые слои (по модели «чистая архитектура»)
+- **Презентационный слой (Client)**
+  - Windows приложения `mb_mount.py` + `daemon.pyw`.
+  - Отвечают за UX: микросервисы авторизации RFID/PIN, отображение состояния, управление монтированием.
+  - Выполняют контракт API через HTTPS/JSON.
+- **Прикладной слой (Server API)**
+  - `scc.py` (Web API, аутентификация, маршрутизация, бизнес-логика).
+  - Четкое разделение на модули: `auth`, `user`, `mount`, `audit`.
+  - Идема: контроллер -> сервис -> репозиторий.
+- **Инфраструктурный слой**
+  - Samba (создание общих ресурсов, ACL, система файлов).
+  - Unix-учётные записи и права, systemd, хранилище конфигурации.
+  - SQLite (DB schema + миграции)
+- **Доменный слой**
+  - Сущности: User, Role, Group, Card, Mount, Class.
+  - Правила доступа как бизнес-правила, инкапсулированные в сервисе `PermissionService`.
+
+#### 2. Архитектурный компонентный вид
+```
++---------------------------+      +-----------------------------+
+| Windows Client (mb_mount) | <--> |  SCC Server HTTP JSON API   |
+| Windows Client (daemon)   |      |  - AuthService              |
++---------------------------+      |  - UserService              |
+                                    |  - MountService             |
+                                    |  - AuditService             |
+                                    +-------------+---------------+
+                                                  |
+                                                  v
+                                    +-----------------------------+
+                                    | Infrastructure Adapters     |
+                                    |  - SambaAdapter             |
+                                    |  - LinuxUserAdapter         |
+                                    |  - SQLiteRepository         |
+                                    +-----------------------------+
+```
+
+#### 3. Нефункциональные требования (NFR)
+- Безопасность: шифрование канала (TLS), строгая валидация, RBAC, секретное хранилище.
+- Надежность: доступность 99.9%, автосборка и health checks, повторные попытки операций монтирования.
+- Масштабируемость: возможность отделить API слой и файловый storage; заменить SQLite на PostgreSQL при необходимости.
+- Обслуживаемость: логика внутри модулей, покрытие тестами 80%+, CI/CD, документированный API.
+
+#### 4. Архитектурные проблемы текущей реализации (по результатам аудита)
+- Монолитный `scc.py` смешивает маршрутизацию, бизнес-логику и систему (`os.system`) вызовы.
+- Отсутствие TLS/HTTPS, устаревший HTTP на порт 80.
+- Хранение секретов в `/etc/default/scc` открытым текстом.
+- Неразделенная ответственность: UI, аутентификация и монтирование перемешаны в `daemon.pyw`.
+- SQLite без миграций и схемы версий, нет backup/restore стратегии.
+
+#### 5. Рекомендации к исправлению архитектуры
+1. Вынести API в отдельный модуль `server/api.py`.
+2. Ввести сервисы `auth_service.py`, `user_service.py`, `mount_service.py`, `audit_service.py`.
+3. Перевести взаимодействие с Samba в `samba_adapter.py` + использовать `subprocess.run([...], check=True)`.
+4. Сменить SQLite на PostgreSQL в production; на время – добавить `alembic`-миграции.
+5. Включить TLS (nginx/letsencrypt, либо `ssl` в Python HTTP сервере).
+6. Сделать RBAC через токены/JWT, с refresh-token и logout.
+7. Перейти от конфига shell cmd с паролями к vault-секретам (например, HashiCorp Vault или файл с правами 600).
+
+#### 6. Коммерческая архитектура: C4 + операционное сопровождение
+- Уровень System Context:
+  - Пользователь Windows (ученик/учитель/админ)
+  - SCC API (Linux) с TLS, JWT, RBAC
+  - Samba Storage (файловый сервер, ACL)
+  - Hardware (RFID reader)
+- Уровень Container:
+  - `api-service` (Flask/FastAPI, бизнес-логика)
+  - `db-service` (PostgreSQL, миграции)
+  - `samba-service` (разделяемое хранилище, ACL)
+  - `web-client`/`crm` (future)
+- Уровень Component:
+  - `AuthController`, `UserController`, `MountController`, `AuditController`
+  - `AuthService`, `SambaService`, `PermissionService`, `HealthService`
+  - `UserRepository`, `CardRepository`, `MountRepository`
+- Уровень Code:
+  - Использовать статическую типизацию (mypy), контрактные тесты, API schema (`openapi.yaml`).
+
+#### 7. Продуктовые требования и операционные процессы
+- CI/CD pipeline:
+  - pre-commit linters, unit tests, security scans, integration tests.
+  - deploy to staging + canary production.
+- SRE: мониторинг (Prometheus + Grafana), alerting, SLA, recovery playbooks.
+- Управление конфигурацией: Ansible/Terraform для всех сред + immutability.
+- Документированные ADR: архитектурные решения + trade-offs, versioning, rollback.
+
+### Ключевые технологии (обновлённый уровень)
+
+- **Сервер:** Python 3, SQLite, Samba, systemd
+- **Клиент:** Python 3, PyQt6, pyserial
+- **Аппаратное обеспечение:** Arduino с RFID RC522
+
+### Роли пользователей
+- **Ученик:** Доступ к личной папке (RW), папке класса (R)
+- **Учитель:** Доступ к личной папке (RW), папкам классов (RW), папкам учеников (RW для проверки)
+- **Админ:** Полный доступ через ACL
+
+## Детальная архитектура
+
+### Клиент-серверная архитектура
+Система построена на архитектуре клиент-сервер с тремя основными слоями:
+1. **Клиентский слой:** Windows-приложения для монтирования дисков и аутентификации
+2. **Серверный слой:** Linux-сервер с HTTP API и управлением Samba
+3. **Хранилище:** SQLite база данных и файловая система с bind-mounts
+
+### Потоки данных
+- **Аутентификация:** RFID карта → хэш → сервер верификация → PIN диалог → монтирование диска
+- **Монтирование:** Сервер возвращает UNC путь → клиент монтирует через `net use`
+- **Регистрация:** RFID карта + PIN → сервер сохраняет хэши
+
+### Структура хранения
+```
+/srv/samba/
+├── school.db
+├── classes/9_A/ (материалы класса)
+├── students/9_A/student001/ (личная папка ученика)
+├── teachers/teacher001/ (личная папка учителя)
+└── for_teachers/ (общие ресурсы учителей)
+
+/srv/samba_mounts/ (виртуальные точки монтирования для Samba)
+├── student001/
+│   ├── 9_A → /srv/samba/classes/9_A (bind, RO)
+│   └── student001 → /srv/samba/students/9_A/student001 (RW)
+└── teacher001/
+    ├── teachers → /srv/samba/teachers/teacher001 (RW)
+    ├── for_teachers → /srv/samba/for_teachers (RW)
+    └── 9_A → /srv/samba/classes/9_A (RW)
+```
+
+## Глубокие погружения в компоненты
+
+### Сервер (scc.py)
+**Основные классы:**
+- `SchoolSamba`: Оркестратор сервера
+- `SCCRequestHandler`: HTTP обработчик API
+
+**Обязанности:**
+- Управление базой данных SQLite
+- Создание пользователей и групп Unix
+- Настройка Samba пользователей
+- Управление bind-mounts и разрешениями
+- HTTP REST API
+
+**Ключевые функции:**
+- CLI команды: init, addstudent, addteacher, mount, serve и т.д.
+- API endpoints: /api/scc/register_card, /api/scc/verify_card, /api/scc/auth
+
+### GUI Mounter (mb_mount.py)
+**Основной класс:** `SafeClassMounterWin(QMainWindow)`
+
+**Функции:**
+- Монтирование/размонтирование сетевых дисков
+- Интеграция RFID сканера
+- Регистрация карт с PIN
+
+**Потоки:** `RfidReadWorker` для фонового чтения RFID
+
+### PIN Daemon (daemon.pyw)
+**Основной класс:** `PinDialog(QDialog)`
+
+**Функции:**
+- Мониторинг RFID сканера
+- Диалог ввода PIN
+- Аутентификация через сервер
+- Монтирование дисков после успешной аутентификации
+
+### RFID Firmware (SCC_rfid_scanner.ino)
+**Платформа:** Arduino Nano с RC522
+
+**Протокол:**
+- PC: "HELLO_SCC\n"
+- Device: "SCC_RFID_V1_OK\n"
+- При обнаружении карты: "CARD_HASH:<HEX_SHA256(UID||SALT)>\n"
+
+## Справочник по API
+
+### Конечные точки
+- `POST /api/scc/register_card`: Регистрация RFID карты
+  - Вход: {username, card_hash, pin}
+  - Выход: {success, message}
+
+- `POST /api/scc/verify_card`: Проверка существования карты
+  - Вход: {card_hash}
+  - Выход: {exists, require_pin}
+
+- `POST /api/scc/verify_pin`: Верификация PIN
+  - Вход: {card_hash, pin_hash}
+  - Выход: {valid}
+
+- `POST /api/scc/auth`: Комбинированная аутентификация
+  - Вход: {uuid, pin_hash}
+  - Выход: {server, username, drive_letter, password?}
+
+### Поток аутентификации
+1. Свайп карты → чтение хэша
+2. POST /verify_card → проверка существования
+3. Если требуется PIN → диалог ввода
+4. POST /auth → верификация
+5. Монтирование диска
+
+## Архитектура безопасности
+
+### Текущие меры
+- Хэширование PIN (SHA-256 на клиенте)
+- Хэширование RFID UID с солью
+- Ролевой контроль доступа через POSIX ACL
+- Samba hide unreadable
+
+### Выявленные уязвимости (из roadmap)
+- **P0:** Логирование PIN в plaintext в daemon.pyw
+- **P0:** Command injection в mb_mount.py (shell=True)
+- **P0:** Небезопасная настройка Samba с паролями в командах
+- **P1:** Недостаточная обработка ошибок
+- **P1:** Отсутствие формального тестирования
+
+### Предложения по смягчению
+- Маскировать PIN в логах
+- Использовать subprocess с аргументами вместо shell=True
+- Хранить пароли в переменных окружения
+- Добавить валидацию ввода
+- Внедрить unit и integration тесты
+
+## Руководство по развертыванию и операциям
+
+### Установка
+```bash
+sudo bash ./scripts/scc_server.sh install --src /path/to/SCC
+sudo bash ./scripts/scc_server.sh status
+```
+
+### Systemd сервис
+Файл: systemd/scc-http.service
+- Type: simple
+- ExecStart: python3 -u /opt/safe_computer_class/scc.py serve $SCC_HOST $SCC_PORT
+
+### Переменные окружения (/etc/default/scc)
+```
+SCC_HOST=0.0.0.0
+SCC_PORT=80
+SAFE_CLASS_SMB_SERVER=192.168.0.10
+SAFE_CLASS_DRIVE=Z:
+SAFE_CLASS_AUTH_RETURN_PASSWORD=0
+SAFE_CLASS_SMB_PASSWORD=secret
+```
+
+### Устранение неисправностей
+- Проверить статус сервиса: systemctl status scc-http
+- Логи: journalctl -u scc-http
+- Тестирование API: curl -X POST http://localhost/api/scc/verify_card -d '{"card_hash":"test"}'
+
+## Схема базы данных и хранения
+
+### SQLite схема
+```sql
+CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, role TEXT, class_name TEXT, uid INTEGER);
+CREATE TABLE classes (name TEXT PRIMARY KEY);
+CREATE TABLE mounts (username TEXT, mount_path TEXT, source_path TEXT);
+CREATE TABLE teacher_classes (teacher TEXT, class_name TEXT);
+CREATE TABLE cards (card_hash TEXT PRIMARY KEY, username TEXT, pin_hash TEXT);
+```
+
+### Модель разрешений
+| Роль | Личная папка | Папка класса | Папки учеников | Папка учителей | Для учителей |
+|------|--------------|--------------|----------------|----------------|--------------|
+| Ученик | RW | R | - | - | - |
+| Учитель | RW | RW | RW | RW | RW |
+| Админ | Полный | Полный | Полный | Полный | Полный |
+
+## Руководство по интеграции аппаратного обеспечения
+
+### Настройка RFID сканера
+1. Прошить Arduino с SCC_rfid_scanner.ino
+2. Подключить RC522 к Arduino (SPI)
+3. Подключить Arduino к COM порту
+4. Проверить последовательную связь: 115200 baud
+
+### Протокол связи
+- Инициализация: PC отправляет "HELLO_SCC\n"
+- Arduino отвечает "SCC_RFID_V1_OK\n"
+- При свайпе: Arduino отправляет "CARD_HASH:<hash>\n"
+
+### Устранение неисправностей
+- Проверить питание Arduino
+- Проверить соединения SPI
+- Тестировать с Serial Monitor Arduino IDE
+- Проверить COM порт в Device Manager (Windows)
+
+## Фреймворк тестирования и валидации
+
+### Стратегия тестирования
+- **Модульные тесты:** Для каждого компонента (scc.py, mb_mount.py, daemon.pyw)
+- **Интеграционные тесты:** API endpoints, полные потоки аутентификации
+- **Аппаратные тесты:** Валидация RFID сканера и последовательной связи
+
+### Инструменты
+- pytest для Python компонентов
+- requests для тестирования API
+- Arduino Serial Monitor для hardware
+
+### Процедуры валидации
+1. Тестирование API: curl команды для всех endpoints
+2. Тестирование монтирования: net use команды
+3. Тестирование RFID: симуляция свайпов
+4. Полные end-to-end тесты: от свайпа до монтирования
+
+## Дорожная карта и будущие улучшения
+
+### Текущий спринт (Sprint-1)
+- Исправление критических уязвимостей безопасности
+- Улучшение обработки ошибок
+- Добавление базового тестирования
+
+### Известные проблемы
+- Логирование PIN в plaintext
+- Command injection
+- Отсутствие resilience в mount/umount
+- Хрупкая авто-детекция RFID портов
+
+### Запланированные функции
+- Минимальные автотесты
+- Улучшенная обработка ошибок
+- CI/CD pipeline
+- Кросс-платформенная поддержка
+- Расширенная модель разрешений
+
+### Будущие улучшения
+- Web-интерфейс для администрирования
+- Поддержка мобильных клиентов
+- Интеграция с Active Directory
+- Аналитика использования
+- Многофакторная аутентификация

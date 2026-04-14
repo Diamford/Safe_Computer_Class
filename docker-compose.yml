@@ -1,0 +1,43 @@
+services:
+  api-service:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    container_name: scc-api
+    environment:
+      SCC_HOST: 0.0.0.0
+      SCC_PORT: 8080
+      SCC_USE_SUDO: "0"
+      SAFE_CLASS_SMB_SERVER: samba-service
+      SAFE_CLASS_DRIVE: "Z:"
+      SAFE_CLASS_AUTH_RETURN_PASSWORD: "0"
+    ports:
+      - "8080:8080"
+    volumes:
+      - samba_data:/srv/samba
+      - samba_mounts:/srv/samba_mounts
+    depends_on:
+      samba-service:
+        condition: service_started
+    restart: unless-stopped
+
+  samba-service:
+    image: dperson/samba:latest
+    container_name: scc-samba
+    command: >
+      -u "scc;scc"
+      -s "school;/srv/samba_mounts;yes;no;yes;all;none"
+      -w "SCHOOL"
+      -g "map to guest = never"
+      -g "hide unreadable = yes"
+    ports:
+      - "139:139"
+      - "445:445"
+    volumes:
+      - samba_data:/srv/samba
+      - samba_mounts:/srv/samba_mounts
+    restart: unless-stopped
+
+volumes:
+  samba_data:
+  samba_mounts:
